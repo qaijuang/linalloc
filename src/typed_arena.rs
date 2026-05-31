@@ -193,6 +193,8 @@ impl<T> Drop for TypedArena<T> {
 
 #[cfg(test)]
 mod tests {
+    use core::ptr;
+
     use super::*;
 
     // A helper that records drop order and count.
@@ -228,10 +230,8 @@ mod tests {
         let order = Cell::new(Vec::new());
 
         let mut arena = TypedArena::<DropTracker>::new(10);
-        let ptr1 =
-            std::ptr::from_mut(arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap());
-        let _ptr2 =
-            std::ptr::from_mut(arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap());
+        let ptr1 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap());
+        let _ptr2 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap());
 
         arena.reset();
 
@@ -239,8 +239,7 @@ mod tests {
         assert_eq!(order.take(), vec![2, 1]);
 
         // New allocation reuses the first slot.
-        let ptr3 =
-            std::ptr::from_mut(arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap());
+        let ptr3 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap());
         assert_eq!(ptr1, ptr3);
 
         drop(arena);
