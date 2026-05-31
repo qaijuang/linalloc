@@ -1,6 +1,6 @@
 # linalloc (Linear Allocator)
 
-[![miri](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml)
+[![miri](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml)
 
 [![license](https://img.shields.io/github/license/qaijuang/linalloc)](LICENSE)
 
