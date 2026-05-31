@@ -7,8 +7,8 @@ Allocator primitives for single-threaded, fixed-capacity arenas.
 
 This crate provides two arena types:
 
-- [`BumpArena`] allocates untyped memory and **DOES NOT** automatically drop values.
-- [`TypedArena`] allocates values of a specific type `T` and drops them in reverse allocation order.
+- `BumpArena` allocates untyped memory and **DOES NOT** automatically drop values.
+- `TypedArena` allocates values of a specific type `T` and drops them in reverse allocation order.
 
 ## Contributing
 
