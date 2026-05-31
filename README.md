@@ -2,7 +2,7 @@
 
 [![miri](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml)
 
-[![license](https://img.shields.io/github/license/qaijuang/linalloc)]
+[![license](https://img.shields.io/github/license/qaijuang/linalloc)](LICENSE)
 
 Allocator primitives for single-threaded, fixed-capacity arenas.
 
