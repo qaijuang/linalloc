@@ -1,7 +1,6 @@
 # linalloc (Linear Allocator)
 
 [![miri](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml)
-
 [![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
 
 Allocator primitives for single-threaded, fixed-capacity arenas.
