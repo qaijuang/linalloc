@@ -30,7 +30,7 @@ use core::slice;
 ///
 /// // Allocate space for a `u64`.
 /// let layout = Layout::new::<u64>();
-/// let slice = bump.alloc_raw_slice(layout).unwrap();
+/// let slice = bump.alloc_uninit_slice(layout).unwrap();
 /// let ptr = slice.as_mut_ptr().cast::<u64>();
 /// unsafe { ptr.write(42) };
 /// let val = unsafe { &*ptr };
@@ -87,7 +87,7 @@ impl BumpArena {
     /// [`ptr::write`]: core::ptr::write
     /// [`reset`]: BumpArena::reset
     #[allow(clippy::mut_from_ref)]
-    pub fn alloc_raw_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+    pub fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         let size = layout.size();
         if size == 0 {
             let ptr = layout.dangling_ptr().as_ptr().cast::<MaybeUninit<u8>>();
@@ -165,7 +165,7 @@ mod tests {
 
         for align in [1, 2, 4, 8, 16] {
             let layout = Layout::from_size_align(3, align).unwrap();
-            let slice = bump.alloc_raw_slice(layout).unwrap();
+            let slice = bump.alloc_uninit_slice(layout).unwrap();
             let ptr = slice.as_ptr() as usize;
             assert_eq!(ptr % align, 0);
             assert_eq!(slice.len(), 3);
@@ -182,8 +182,8 @@ mod tests {
     #[test]
     fn alloc_no_overlap() {
         let bump = BumpArena::new(64);
-        let a = bump.alloc_raw_slice(Layout::from_size_align(16, 8).unwrap()).unwrap();
-        let b = bump.alloc_raw_slice(Layout::from_size_align(8, 8).unwrap()).unwrap();
+        let a = bump.alloc_uninit_slice(Layout::from_size_align(16, 8).unwrap()).unwrap();
+        let b = bump.alloc_uninit_slice(Layout::from_size_align(8, 8).unwrap()).unwrap();
 
         let a_start = a.as_ptr() as usize;
         let a_end = a_start + a.len();
@@ -197,11 +197,11 @@ mod tests {
     fn alloc_oom_does_not_advance() {
         let bump = BumpArena::new(16);
         let layout = Layout::from_size_align(8, 1).unwrap();
-        bump.alloc_raw_slice(layout).unwrap();
+        bump.alloc_uninit_slice(layout).unwrap();
         let used_before = bump.used();
 
         let too_large = Layout::from_size_align(9, 1).unwrap();
-        assert!(bump.alloc_raw_slice(too_large).is_none());
+        assert!(bump.alloc_uninit_slice(too_large).is_none());
         assert_eq!(bump.used(), used_before);
         assert!(bump.used() <= bump.capacity());
     }
@@ -210,22 +210,22 @@ mod tests {
     fn reset_reuses_base() {
         let bump = BumpArena::new(32);
         let layout = Layout::from_size_align(8, 4).unwrap();
-        let first = bump.alloc_raw_slice(layout).unwrap();
+        let first = bump.alloc_uninit_slice(layout).unwrap();
         let first_ptr = first.as_ptr() as usize;
 
         unsafe { bump.reset() };
         assert_eq!(bump.used(), 0);
 
-        let second = bump.alloc_raw_slice(layout).unwrap();
+        let second = bump.alloc_uninit_slice(layout).unwrap();
         let second_ptr = second.as_ptr() as usize;
         assert_eq!(first_ptr, second_ptr);
     }
 
     #[test]
-    fn zero_capacity_rejects_nonzero_alloc_raw_slice() {
+    fn zero_capacity_rejects_nonzero_alloc_uninit_slice() {
         let bump = BumpArena::new(0);
         let layout = Layout::from_size_align(1, 1).unwrap();
-        assert!(bump.alloc_raw_slice(layout).is_none());
+        assert!(bump.alloc_uninit_slice(layout).is_none());
         assert_eq!(bump.used(), 0);
     }
 
@@ -233,7 +233,7 @@ mod tests {
     fn zero_size_alloc_does_not_advance() {
         let bump = BumpArena::new(8);
         let layout = Layout::from_size_align(0, 8).unwrap();
-        let slice = bump.alloc_raw_slice(layout).unwrap();
+        let slice = bump.alloc_uninit_slice(layout).unwrap();
         assert_eq!(slice.len(), 0);
         assert_eq!(bump.used(), 0);
     }
