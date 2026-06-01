@@ -58,7 +58,8 @@ impl BumpArena {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
-            base: NonNull::new(Box::into_raw(Box::new_uninit_slice(capacity))).unwrap(),
+            // SAFETY: `Box` is guaranteed to be non-null.
+            base: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new_uninit_slice(capacity))) },
             offset: Cell::new(0),
             _invariant: PhantomData,
         }

@@ -55,8 +55,9 @@ impl<T> TypedArena<T> {
     /// invoked (typically aborting the process).
     #[must_use]
     pub fn new(capacity: usize) -> Self {
-        TypedArena {
-            base: NonNull::new(Box::into_raw(Box::new_uninit_slice(capacity))).unwrap(),
+        Self {
+            // SAFETY: `Box` is guaranteed to be non-null.
+            base: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new_uninit_slice(capacity))) },
             offset: Cell::new(0),
             _invariant: PhantomData,
         }
