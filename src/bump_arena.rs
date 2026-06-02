@@ -98,12 +98,11 @@ impl BumpArena {
         let offset = self.offset.get();
         let base = self.base.as_ptr().cast::<MaybeUninit<u8>>();
 
-        let pad = unsafe { base.add(offset) }.align_offset(align);
-        if pad == usize::MAX {
-            return None;
-        }
-
-        let aligned = offset.checked_add(pad)?;
+        let base_addr = base as usize;
+        let addr = base_addr + offset;
+        let align_mask = align - 1;
+        let aligned_addr = addr.checked_add(align_mask)? & !align_mask;
+        let aligned = aligned_addr - base_addr;
         let offset = aligned.checked_add(size)?;
         if offset > self.capacity() {
             return None;
