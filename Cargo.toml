@@ -1,3 +1,7 @@
 [package]
 name = "linalloc"
 edition = "2024"
+
+[features]
+default = []
+lazy = []

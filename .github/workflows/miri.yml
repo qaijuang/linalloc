@@ -38,6 +38,9 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt -- --check
 
+      - name: Run tests
+        run: cargo test --all-features
+
       - name: Run miri tests
         run: cargo +nightly miri test
 
