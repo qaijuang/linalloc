@@ -4,11 +4,15 @@
 mod bump_arena;
 #[cfg(feature = "lazy")]
 mod bump_arena_lazy;
-#[allow(dead_code, reason = "work in progress")]
+#[cfg(feature = "lazy")]
 pub(crate) mod sys;
 mod typed_arena;
+#[cfg(feature = "lazy")]
+mod typed_arena_lazy;
 
 pub use bump_arena::*;
 #[cfg(feature = "lazy")]
 pub use bump_arena_lazy::*;
 pub use typed_arena::*;
+#[cfg(feature = "lazy")]
+pub use typed_arena_lazy::*;

@@ -1,0 +1,366 @@
+use core::cell::Cell;
+use core::marker::PhantomData;
+use core::mem::{MaybeUninit, size_of};
+use core::ptr::{NonNull, drop_in_place};
+
+use crate::sys;
+
+/// A fixed‑capacity, single‑threaded arena that allocates values of type `T`
+/// and automatically drops them in reverse allocation order.
+///
+/// The backing store is a reserved virtual‑memory region whose total capacity
+/// is set at construction in *elements*. Physical memory is committed on
+/// demand as elements are allocated, so the arena can be created with a very
+/// large capacity without immediately consuming physical memory.
+///
+/// # Invariance and thread safety
+///
+/// `TypedArenaLazy<T>` is **invariant** in `T` (because [`MaybeUninit<T>`] is
+/// invariant) and **`!Send + !Sync`** -- it contains a raw‑pointer marker that
+/// prevents the value from leaving the thread where it was created. This
+/// guarantees:
+///
+/// - No unsound subtyping (e.g. treating a `String` arena as a `dyn Display`
+///   arena, which would break `Drop`).
+/// - The arena is confined to a single thread.
+///
+/// # Examples
+///
+/// ```
+/// use linalloc::TypedArenaLazy;
+///
+/// let mut arena = TypedArenaLazy::<String>::new(5);
+///
+/// let s = arena.alloc_raw("hello".to_string()).unwrap();
+/// assert_eq!(s, "hello");
+///
+/// // All values are dropped when `arena` goes out of scope.
+/// ```
+pub struct TypedArenaLazy<T> {
+    base: NonNull<MaybeUninit<T>>,
+    capacity: usize,
+    offset: Cell<usize>,
+    commit: Cell<usize>,
+    _invariant: PhantomData<*const ()>,
+}
+
+impl<T> TypedArenaLazy<T> {
+    /// Creates a new typed arena that can hold up to `capacity` elements of
+    /// type `T`.
+    ///
+    /// The backing memory is **reserved** but not committed -- physical pages
+    /// are allocated only as elements are added. If `capacity` is zero, or
+    /// `T` is a zero‑sized type (e.g. `()`), the arena is empty and will
+    /// reject all non‑zero‑sized allocations.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system cannot reserve the requested address
+    /// range, or if the required byte size overflows.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        if capacity == 0 || size_of::<T>() == 0 {
+            return Self {
+                base: NonNull::dangling(),
+                capacity,
+                offset: Cell::new(0),
+                commit: Cell::new(0),
+                _invariant: PhantomData,
+            };
+        }
+
+        let size_bytes =
+            capacity.checked_mul(size_of::<T>()).expect("TypedArenaLazy: capacity overflow");
+        let base = sys::reserve(size_bytes).expect("TypedArenaLazy: out of virtual address space");
+
+        Self {
+            base: base.cast(),
+            capacity,
+            offset: Cell::new(0),
+            commit: Cell::new(0),
+            _invariant: PhantomData,
+        }
+    }
+
+    /// Allocates a new `T` by moving `value` into the arena.
+    ///
+    /// The returned mutable reference borrows the arena immutably (`&self`),
+    /// so the arena is frozen (cannot be dropped or reset) until the reference
+    /// goes out of scope. Multiple allocations can coexist without aliasing.
+    ///
+    /// Zero‑sized types (e.g. `()`) are handled specially: they consume no
+    /// capacity and always succeed.
+    ///
+    /// # Returns
+    ///
+    /// `None` if the arena is full (i.e. [`len`](Self::len) == [`capacity`](Self::capacity)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::TypedArenaLazy;
+    ///
+    /// let arena = TypedArenaLazy::<i32>::new(10);
+    /// let x = arena.alloc_raw(42).unwrap();
+    /// assert_eq!(*x, 42);
+    /// ```
+    #[allow(clippy::mut_from_ref)]
+    pub fn alloc_raw(&self, value: T) -> Option<&mut T> {
+        // ZST's never consume capacity.
+        if size_of::<T>() == 0 {
+            unsafe {
+                let dangling = NonNull::<T>::dangling();
+                dangling.as_ptr().write(value);
+                return Some(&mut *dangling.as_ptr());
+            }
+        }
+
+        let idx = self.offset.get();
+        if idx >= self.capacity {
+            return None;
+        }
+
+        // `new` guarantees `capacity * size_of::<T>()` fits, and `idx < capacity`.
+        let required_bytes = (idx + 1) * size_of::<T>();
+
+        // Ensure enough memory is committed.
+        if required_bytes > self.commit.get() {
+            self.try_commit(required_bytes)?;
+        }
+
+        // Initialise the slot.
+        unsafe {
+            let slot = self.base.as_ptr().add(idx);
+            let r = (&mut *slot).write(value);
+            self.offset.set(idx + 1);
+            Some(r)
+        }
+    }
+
+    // With the code in `try_commit()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
+    #[cold]
+    fn try_commit(&self, required_bytes: usize) -> Option<()> {
+        let page = sys::page_size();
+        let current = self.commit.get();
+
+        // `new` guarantees `capacity * size_of::<T>()` fits.
+        let total_bytes = self.capacity * size_of::<T>();
+
+        // Next page rounding
+        let needed = required_bytes.checked_next_multiple_of(page)?.min(total_bytes);
+
+        if needed <= current {
+            return Some(());
+        }
+
+        // Safety:
+        // > `current` is page‑aligned and within the reservation.
+        // > `needed - current` is a multiple of the page size.
+        unsafe {
+            let addr = NonNull::new_unchecked(self.base.as_ptr().cast::<u8>().add(current));
+            sys::commit(addr, needed - current).ok()?;
+        }
+
+        self.commit.set(needed);
+        Some(())
+    }
+
+    /// Returns the number of elements currently allocated in the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::TypedArenaLazy;
+    ///
+    /// let mut arena = TypedArenaLazy::<i32>::new(10);
+    /// assert_eq!(arena.len(), 0);
+    /// arena.alloc_raw(1);
+    /// assert_eq!(arena.len(), 1);
+    /// ```
+    pub fn len(&self) -> usize {
+        self.offset.get()
+    }
+
+    /// Returns `true` if the arena contains no allocated elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::TypedArenaLazy;
+    ///
+    /// let arena = TypedArenaLazy::<i32>::new(10);
+    /// assert!(arena.is_empty());
+    /// arena.alloc_raw(1);
+    /// assert!(!arena.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the maximum number of elements the arena can hold.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Drops all live `T` values in reverse allocation order and resets the
+    /// arena for reuse.
+    ///
+    /// Because this method takes `&mut self`, the borrow checker guarantees
+    /// that no references to the arena's contents are currently alive. After
+    /// the call, [`len`](Self::len) returns `0`.
+    ///
+    /// Committed memory is not decommitted -- subsequent allocations will reuse
+    /// the already‑committed pages.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::TypedArenaLazy;
+    ///
+    /// let mut arena = TypedArenaLazy::<Vec<i32>>::new(5);
+    /// {
+    ///     let v = arena.alloc_raw(vec![1, 2, 3]).unwrap();
+    /// } // v goes out of scope -- can call `reset` now.
+    /// arena.reset();
+    /// assert_eq!(arena.len(), 0);
+    /// ```
+    pub fn reset(&mut self) {
+        let offset = self.offset.get();
+        unsafe {
+            let start = self.base.as_ptr().cast::<T>();
+            // Drop in reverse order per Rust's usual drop semantics.
+            for i in (0..offset).rev() {
+                drop_in_place(start.add(i));
+            }
+        }
+        self.offset.set(0);
+    }
+}
+
+impl<T> Drop for TypedArenaLazy<T> {
+    fn drop(&mut self) {
+        let offset = self.offset.get();
+        unsafe {
+            let start = self.base.as_ptr().cast::<T>();
+            for i in (0..offset).rev() {
+                drop_in_place(start.add(i));
+            }
+            if self.capacity > 0 && size_of::<T>() > 0 {
+                let total_bytes = self.capacity * size_of::<T>();
+                sys::release(self.base.cast(), total_bytes);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ptr;
+
+    use super::*;
+
+    // A helper that records drop order and count.
+    struct DropTracker<'a> {
+        id: u32,
+        order: &'a Cell<Vec<u32>>,
+    }
+
+    impl Drop for DropTracker<'_> {
+        fn drop(&mut self) {
+            let mut v = self.order.take();
+            v.push(self.id);
+            self.order.set(v);
+        }
+    }
+
+    #[test]
+    fn drop_order_reverse_allocation() {
+        let order = Cell::new(Vec::new());
+        let arena = TypedArenaLazy::<DropTracker>::new(10);
+
+        arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap();
+        arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap();
+        arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap();
+
+        drop(arena);
+
+        assert_eq!(order.take(), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn reset_drops_values_and_reuses_memory() {
+        let order = Cell::new(Vec::new());
+
+        let mut arena = TypedArenaLazy::<DropTracker>::new(10);
+        let ptr1 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap());
+        let _ptr2 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap());
+
+        arena.reset();
+
+        // After reset, all previous values must have been dropped.
+        assert_eq!(order.take(), vec![2, 1]);
+
+        // New allocation reuses the first slot.
+        let ptr3 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap());
+        assert_eq!(ptr1, ptr3);
+
+        drop(arena);
+        assert_eq!(order.take(), vec![3]);
+    }
+
+    #[test]
+    fn no_double_drop_after_reset() {
+        struct Counter<'a>(&'a Cell<u32>);
+        impl Drop for Counter<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let count = Cell::new(0u32);
+
+        let mut arena = TypedArenaLazy::<Counter>::new(10);
+        arena.alloc_raw(Counter(&count)).unwrap();
+        arena.alloc_raw(Counter(&count)).unwrap();
+
+        arena.reset();
+        assert_eq!(count.get(), 2); // both dropped exactly once
+
+        arena.alloc_raw(Counter(&count)).unwrap();
+        drop(arena);
+        assert_eq!(count.get(), 3); // only the new one dropped
+    }
+
+    #[test]
+    fn oom_does_not_advance_offset() {
+        let arena = TypedArenaLazy::<u64>::new(1); // holds exactly 1 u64
+        assert!(arena.alloc_raw(1u64).is_some());
+        assert_eq!(arena.len(), 1);
+        assert!(arena.alloc_raw(2u64).is_none());
+        assert_eq!(arena.len(), 1);
+    }
+
+    #[test]
+    fn zst_does_not_advance_offset() {
+        let arena = TypedArenaLazy::<()>::new(0);
+        assert!(arena.alloc_raw(()).is_some());
+        assert_eq!(arena.len(), 0);
+        assert!(arena.alloc_raw(()).is_some());
+        assert_eq!(arena.len(), 0);
+    }
+
+    #[test]
+    fn allocated_value_is_valid() {
+        let arena = TypedArenaLazy::<String>::new(1);
+        let s = arena.alloc_raw("hello".to_string()).unwrap();
+        assert_eq!(s, "hello");
+        s.push_str(" world");
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    #[should_panic(expected = "TypedArenaLazy: capacity overflow")]
+    fn new_panics_on_capacity_overflow() {
+        let _arena = TypedArenaLazy::<u16>::new(usize::MAX);
+    }
+}
