@@ -286,7 +286,6 @@ mod tests {
         assert_eq!(arena.len(), 0);
         assert!(arena.alloc_raw(()).is_some());
         assert_eq!(arena.len(), 0);
-        drop(arena);
     }
 
     #[test]
