@@ -169,7 +169,7 @@ impl<T> TypedArena<T> {
     pub fn reset(&mut self) {
         let offset = self.offset.get();
         unsafe {
-            let start = self.base.as_ptr().cast::<MaybeUninit<T>>().cast::<T>();
+            let start = self.base.as_ptr().cast::<T>();
             // Drop in reverse order per Rust's usual drop semantics.
             for i in (0..offset).rev() {
                 drop_in_place(start.add(i));
@@ -183,7 +183,7 @@ impl<T> Drop for TypedArena<T> {
     fn drop(&mut self) {
         let offset = self.offset.get();
         unsafe {
-            let start = self.base.as_ptr().cast::<MaybeUninit<T>>().cast::<T>();
+            let start = self.base.as_ptr().cast::<T>();
             for i in (0..offset).rev() {
                 drop_in_place(start.add(i));
             }
