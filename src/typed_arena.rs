@@ -14,9 +14,9 @@ use core::ptr::{NonNull, drop_in_place};
 ///
 /// # Invariance and thread safety
 ///
-/// `TypedArena<T>` is **invariant** in `T` (because `MaybeUninit<T>`
-/// is invariant) and **`!Send + !Sync`** (the raw‑pointer marker
-/// prevents cross‑thread usage).  This guarantees:
+/// `TypedArena<T>` is **invariant** in `T` and **`!Send + !Sync`**.
+/// The marker field prevents unsound subtyping and cross‑thread usage. This
+/// guarantees:
 ///
 /// - No unsound subtyping (e.g., treating a `String` arena as a
 ///   `dyn Display` arena, which would break `Drop`).
@@ -40,7 +40,8 @@ use core::ptr::{NonNull, drop_in_place};
 pub struct TypedArena<T> {
     base: NonNull<[MaybeUninit<T>]>,
     offset: Cell<usize>,
-    _invariant: PhantomData<*const ()>,
+    #[allow(clippy::type_complexity)]
+    _invariant: PhantomData<(*const (), fn(T) -> T)>,
 }
 
 impl<T> TypedArena<T> {

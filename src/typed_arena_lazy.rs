@@ -15,9 +15,8 @@ use crate::sys;
 ///
 /// # Invariance and thread safety
 ///
-/// `TypedArenaLazy<T>` is **invariant** in `T` (because [`MaybeUninit<T>`] is
-/// invariant) and **`!Send + !Sync`** -- it contains a raw‑pointer marker that
-/// prevents the value from leaving the thread where it was created. This
+/// `TypedArenaLazy<T>` is **invariant** in `T` and **`!Send + !Sync`**. The
+/// marker field prevents unsound subtyping and cross‑thread usage. This
 /// guarantees:
 ///
 /// - No unsound subtyping (e.g. treating a `String` arena as a `dyn Display`
@@ -41,7 +40,8 @@ pub struct TypedArenaLazy<T> {
     capacity: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
-    _invariant: PhantomData<*const ()>,
+    #[allow(clippy::type_complexity)]
+    _invariant: PhantomData<(*const (), fn(T) -> T)>,
 }
 
 impl<T> TypedArenaLazy<T> {
