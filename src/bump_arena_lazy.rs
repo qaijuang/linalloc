@@ -156,7 +156,7 @@ impl BumpArenaLazy {
         }
     }
 
-    // With the code in `try_commit()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
+    // With the code in `try_commit()` out of the way, `alloc_uninit_slice()` compiles down to some super tight assembly.
     #[cold]
     fn try_commit(&self, required_offset: usize) -> Option<()> {
         let page = sys::page_size();
