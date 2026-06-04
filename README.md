@@ -1,11 +1,10 @@
 # linalloc (Linear Allocator)
 
 [![miri](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml)
-[![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
-
-<!-- [![MSRV](https://img.shields.io/crates/msrv/linalloc)](https://crates.io/crates/linalloc)
+[![MSRV](https://img.shields.io/crates/msrv/linalloc)](https://crates.io/crates/linalloc)
+[![crates.io](https://img.shields.io/crates/v/linalloc)](https://crates.io/crates/linalloc)
 [![docs.rs](https://img.shields.io/docsrs/linalloc)](https://docs.rs/linalloc)
-[![crates.io](https://img.shields.io/crates/dv/linalloc)](https://crates.io/crates/linalloc) -->
+[![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
 
 Small, fixed-capacity arena allocators for single-threaded Rust programs.
 
