@@ -51,6 +51,7 @@ use crate::sys;
 ///
 /// // Memory is freed when `bump` goes out of scope.
 /// ```
+#[cfg_attr(test, derive(Debug))]
 pub struct BumpArenaLazy {
     base: NonNull<u8>,
     capacity: usize,
@@ -210,8 +211,8 @@ impl BumpArenaLazy {
     /// - On Unix: the `errno` value (positive integer).
     /// - On Windows: the `GetLastError` code.
     ///
-    /// Returns `None` if no failure has occurred since the arena was created
-    /// or since the last successful operation.
+    /// Returns `None` if no OS-backed reserve or commit failure has been
+    /// recorded for this arena.
     ///
     /// # Semantics
     ///

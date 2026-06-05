@@ -35,6 +35,7 @@ use crate::sys;
 ///
 /// // All values are dropped when `arena` goes out of scope.
 /// ```
+#[cfg_attr(test, derive(Debug))]
 pub struct TypedArenaLazy<T> {
     base: NonNull<MaybeUninit<T>>,
     capacity: usize,
@@ -194,8 +195,8 @@ impl<T> TypedArenaLazy<T> {
     /// - On Unix: the `errno` value (positive integer).
     /// - On Windows: the `GetLastError` code.
     ///
-    /// Returns `None` if no failure has occurred since the arena was created
-    /// or since the last successful operation.
+    /// Returns `None` if no OS-backed reserve or commit failure has been
+    /// recorded for this arena.
     ///
     /// # Semantics
     ///
