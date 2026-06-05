@@ -91,11 +91,36 @@ mod platform {
 
         fn sysconf(name: i32) -> i64;
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        fn __error() -> *mut i32;
-
-        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-        fn __errno_location() -> *mut i32;
+        // yanked from https://github.com/rust-lang/rust/blob/main/library/std/src/sys/io/error/unix.rs
+        #[cfg(not(any(target_os = "dragonfly", target_os = "vxworks", target_os = "rtems")))]
+        #[cfg_attr(
+            any(
+                target_os = "linux",
+                target_os = "emscripten",
+                target_os = "fuchsia",
+                target_os = "l4re",
+                target_os = "hurd",
+            ),
+            link_name = "__errno_location"
+        )]
+        #[cfg_attr(
+            any(
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "cygwin",
+                target_os = "android",
+                target_os = "redox",
+                target_os = "nuttx",
+                target_env = "newlib"
+            ),
+            link_name = "__errno"
+        )]
+        #[cfg_attr(any(target_os = "solaris", target_os = "illumos"), link_name = "___errno")]
+        #[cfg_attr(target_os = "nto", link_name = "__get_errno_ptr")]
+        #[cfg_attr(any(target_os = "freebsd", target_vendor = "apple"), link_name = "__error")]
+        #[cfg_attr(target_os = "haiku", link_name = "_errnop")]
+        #[cfg_attr(target_os = "aix", link_name = "_Errno")]
+        fn errno_location() -> *mut i32;
     }
 
     const PROT_NONE: i32 = 0;
@@ -145,14 +170,7 @@ mod platform {
     }
 
     pub fn last_os_error() -> i32 {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        unsafe {
-            *__error()
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-        unsafe {
-            *__errno_location()
-        }
+        unsafe { *errno_location() }
     }
 
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
