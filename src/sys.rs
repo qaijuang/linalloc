@@ -94,7 +94,7 @@ mod platform {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         fn __error() -> *mut i32;
 
-        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         fn __errno_location() -> *mut i32;
     }
 
@@ -149,7 +149,7 @@ mod platform {
         unsafe {
             *__error()
         }
-        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         unsafe {
             *__errno_location()
         }
