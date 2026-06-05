@@ -13,7 +13,6 @@ categories = ["memory-management"]
 exclude = [".github", "rustfmt.toml", ".gitignore"]
 
 [features]
-default = []
 lazy = []
 
 [package.metadata.docs.rs]
