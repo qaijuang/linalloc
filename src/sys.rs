@@ -51,6 +51,14 @@ pub unsafe fn release(addr: NonNull<u8>, size: usize) {
     unsafe { platform::release(addr, size) }
 }
 
+/// Return the current OS error code.
+///
+/// On Unix this is `errno`, on Windows it is `GetLastError()`.
+/// The value is only meaningful immediately after a failed system call.
+pub fn last_os_error() -> i32 {
+    platform::last_os_error()
+}
+
 /// Returns the system’s page size in bytes.
 ///
 /// The value is cached after the first call -- subsequent calls are
@@ -82,6 +90,12 @@ mod platform {
         fn munmap(addr: *mut c_void, length: usize) -> i32;
 
         fn sysconf(name: i32) -> i64;
+
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        fn __error() -> *mut i32;
+
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+        fn __errno_location() -> *mut i32;
     }
 
     const PROT_NONE: i32 = 0;
@@ -130,6 +144,17 @@ mod platform {
         unsafe { munmap(addr.as_ptr().cast(), size) };
     }
 
+    pub fn last_os_error() -> i32 {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        unsafe {
+            *__error()
+        }
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+        unsafe {
+            *__errno_location()
+        }
+    }
+
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
     #[inline]
@@ -172,6 +197,8 @@ mod platform {
         fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
 
         fn GetSystemInfo(lpSystemInfo: *mut SYSTEM_INFO);
+
+        fn GetLastError() -> u32;
     }
 
     const MEM_RESERVE: u32 = 0x0000_2000;
@@ -208,6 +235,10 @@ mod platform {
 
     pub unsafe fn release(addr: NonNull<u8>, _size: usize) {
         unsafe { VirtualFree(addr.as_ptr().cast(), 0, MEM_RELEASE) };
+    }
+
+    pub fn last_os_error() -> i32 {
+        unsafe { GetLastError() }.cast_signed()
     }
 
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);

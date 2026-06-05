@@ -40,6 +40,7 @@ pub struct TypedArenaLazy<T> {
     capacity: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
+    last_os_error: Cell<i32>,
     #[allow(clippy::type_complexity)]
     _invariant: PhantomData<(*const (), fn(T) -> T)>,
 }
@@ -59,27 +60,44 @@ impl<T> TypedArenaLazy<T> {
     /// range, or if the required byte size overflows.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::try_new(capacity).expect("TypedArenaLazy::new failed to reserve memory")
+    }
+
+    /// Like [`new`], but returns a `Result`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the required byte size overflows.
+    ///
+    /// # Errors
+    ///
+    /// Returns OS error code if reservation fails.
+    ///
+    /// [`new`]: TypedArenaLazy::new
+    pub fn try_new(capacity: usize) -> Result<Self, i32> {
         if capacity == 0 || size_of::<T>() == 0 {
-            return Self {
+            return Ok(Self {
                 base: NonNull::dangling(),
                 capacity,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
+                last_os_error: Cell::new(0),
                 _invariant: PhantomData,
-            };
+            });
         }
 
         let size_bytes =
             capacity.checked_mul(size_of::<T>()).expect("TypedArenaLazy: capacity overflow");
-        let base = sys::reserve(size_bytes).expect("TypedArenaLazy: out of virtual address space");
+        let base = sys::reserve(size_bytes).ok_or_else(sys::last_os_error)?;
 
-        Self {
+        Ok(Self {
             base: base.cast(),
             capacity,
             offset: Cell::new(0),
             commit: Cell::new(0),
+            last_os_error: Cell::new(0),
             _invariant: PhantomData,
-        }
+        })
     }
 
     /// Allocates a new `T` by moving `value` into the arena.
@@ -158,11 +176,37 @@ impl<T> TypedArenaLazy<T> {
         // > `needed - current` is a multiple of the page size.
         unsafe {
             let addr = NonNull::new_unchecked(self.base.as_ptr().cast::<u8>().add(current));
-            sys::commit(addr, needed - current).ok()?;
+            if let Err(()) = sys::commit(addr, needed - current) {
+                // capture the OS error immediately
+                self.last_os_error.set(sys::last_os_error());
+                return None;
+            }
         }
 
         self.commit.set(needed);
         Some(())
+    }
+
+    /// Returns the OS error code from the last failed allocation or commit
+    /// operation, if any.
+    ///
+    /// The returned value is the raw platform‑specific error code:
+    /// - On Unix: the `errno` value (positive integer).
+    /// - On Windows: the `GetLastError` code.
+    ///
+    /// Returns `None` if no failure has occurred since the arena was created
+    /// or since the last successful operation.
+    ///
+    /// # Semantics
+    ///
+    /// This method behaves analogously to [`std::io::Error::last_os_error`] at
+    /// the point of the failed internal system call. The error code is stable
+    /// until the next failure overwrites it.
+    ///
+    /// [`std::io::Error::last_os_error`]: std::io::Error::last_os_error
+    pub fn last_os_error_code(&self) -> Option<i32> {
+        let code = self.last_os_error.get();
+        if code == 0 { None } else { Some(code) }
     }
 
     /// Returns the number of elements currently allocated in the arena.
