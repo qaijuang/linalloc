@@ -192,9 +192,9 @@ impl BumpArenaLazy {
         // > The range has not been committed before, so no overlapping commit.
         unsafe {
             let addr = NonNull::new_unchecked(self.base.as_ptr().add(current));
-            if let Err(()) = sys::commit(addr, needed - current) {
-                // capture the OS error immediately
-                self.last_os_error.set(sys::last_os_error());
+            if let Err(code) = sys::commit(addr, needed - current) {
+                // capture the OS error code immediately
+                self.last_os_error.set(code);
                 return None;
             }
         }

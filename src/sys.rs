@@ -34,8 +34,8 @@ pub fn reserve(size: usize) -> Option<NonNull<u8>> {
 ///
 /// # Errors
 ///
-/// Returns `Err(())` if the system call fails (e.g. out of physical memory).
-pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+/// Returns the OS error code if the system call fails (e.g. out of physical memory).
+pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
     platform::commit(addr, size)
 }
 
@@ -135,9 +135,9 @@ mod platform {
         }
     }
 
-    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
         let ret = unsafe { mprotect(addr.as_ptr().cast(), size, PROT_READ | PROT_WRITE) };
-        if ret == 0 { Ok(()) } else { Err(()) }
+        if ret == 0 { Ok(()) } else { Err(last_os_error()) }
     }
 
     pub unsafe fn release(addr: NonNull<u8>, size: usize) {
@@ -228,9 +228,9 @@ mod platform {
         NonNull::new(ptr.cast())
     }
 
-    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
         let ptr = unsafe { VirtualAlloc(addr.as_ptr().cast(), size, MEM_COMMIT, PAGE_READWRITE) };
-        if ptr.is_null() { Err(()) } else { Ok(()) }
+        if ptr.is_null() { Err(last_os_error()) } else { Ok(()) }
     }
 
     pub unsafe fn release(addr: NonNull<u8>, _size: usize) {

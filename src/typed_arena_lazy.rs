@@ -176,9 +176,9 @@ impl<T> TypedArenaLazy<T> {
         // > `needed - current` is a multiple of the page size.
         unsafe {
             let addr = NonNull::new_unchecked(self.base.as_ptr().cast::<u8>().add(current));
-            if let Err(()) = sys::commit(addr, needed - current) {
-                // capture the OS error immediately
-                self.last_os_error.set(sys::last_os_error());
+            if let Err(code) = sys::commit(addr, needed - current) {
+                // capture the OS error code immediately
+                self.last_os_error.set(code);
                 return None;
             }
         }
