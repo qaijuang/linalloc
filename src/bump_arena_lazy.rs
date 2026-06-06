@@ -108,7 +108,7 @@ impl BumpArenaLazy {
             });
         }
 
-        let base = sys::reserve(capacity).ok_or_else(sys::last_os_error)?;
+        let base = sys::reserve(capacity)?;
 
         Ok(Self {
             base,

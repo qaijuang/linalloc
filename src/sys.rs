@@ -11,11 +11,10 @@ use core::ptr::NonNull;
 ///
 /// The returned pointer is guaranteed to be page‑aligned and non‑null.
 ///
-/// # Returns
+/// # Errors
 ///
-/// `None` if the operating system fails to reserve the requested address
-/// range (e.g. out of address space).
-pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+/// Returns the OS error code if the system call fails (e.g. out of virtual address space).
+pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
     platform::reserve(size)
 }
 
@@ -49,14 +48,6 @@ pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
 /// - No pointers into the released region may be used afterwards.
 pub unsafe fn release(addr: NonNull<u8>, size: usize) {
     unsafe { platform::release(addr, size) }
-}
-
-/// Return the current OS error code.
-///
-/// On Unix this is `errno`, on Windows it is `GetLastError()`.
-/// The value is only meaningful immediately after a failed system call.
-pub fn last_os_error() -> i32 {
-    platform::last_os_error()
 }
 
 /// Returns the system’s page size in bytes.
@@ -137,7 +128,7 @@ mod platform {
 
     const _SC_PAGESIZE: i32 = 29;
 
-    pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+    pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         #[cfg(target_os = "netbsd")]
         // NetBSD allows an mmap(2) caller to specify what protection flags they
         // will use later via mprotect. It does not allow a caller to move from
@@ -153,10 +144,10 @@ mod platform {
             mmap(core::ptr::null_mut(), size, DESIRED_PROT, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
         };
         if ptr.is_null() || ptr == MAP_FAILED {
-            None
+            Err(last_os_error())
         } else {
             // SAFETY: The pointer is already checked and is not null
-            Some(unsafe { NonNull::new_unchecked(ptr.cast()) })
+            Ok(unsafe { NonNull::new_unchecked(ptr.cast()) })
         }
     }
 
@@ -241,9 +232,9 @@ mod platform {
         wProcessorRevision: u16,
     }
 
-    pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+    pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         let ptr = unsafe { VirtualAlloc(core::ptr::null_mut(), size, MEM_RESERVE, PAGE_NOACCESS) };
-        NonNull::new(ptr.cast())
+        NonNull::new(ptr.cast()).ok_or_else(last_os_error)
     }
 
     pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {

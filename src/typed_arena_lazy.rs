@@ -89,7 +89,7 @@ impl<T> TypedArenaLazy<T> {
 
         let size_bytes =
             capacity.checked_mul(size_of::<T>()).expect("TypedArenaLazy: capacity overflow");
-        let base = sys::reserve(size_bytes).ok_or_else(sys::last_os_error)?;
+        let base = sys::reserve(size_bytes)?;
 
         Ok(Self {
             base: base.cast(),
