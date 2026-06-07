@@ -164,7 +164,7 @@ impl BumpArenaLazy {
         }
 
         if offset > self.commit.get() {
-            self.try_commit(offset)?;
+            return self.alloc_uninit_slice_bump(aligned, offset, size);
         }
         self.offset.set(offset);
 
@@ -178,14 +178,21 @@ impl BumpArenaLazy {
         }
     }
 
-    // With the code in `try_commit()` out of the way, `alloc_uninit_slice()` compiles down to some super tight assembly.
+    // With the code in `alloc_uninit_slice_bump()` out of the way, `alloc_uninit_slice()` compiles down to some super tight assembly.
     #[cold]
-    fn try_commit(&self, required_offset: usize) -> Option<()> {
+    #[inline(never)]
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_uninit_slice_bump(
+        &self,
+        aligned: usize,
+        offset: usize,
+        size: usize,
+    ) -> Option<&mut [MaybeUninit<u8>]> {
         let page = sys::page_size();
         let current = self.commit.get();
 
-        // Round required_offset up to the next page boundary, capped by capacity.
-        let needed = required_offset.checked_next_multiple_of(page)?.min(self.capacity);
+        // Round offset up to the next page boundary, capped by capacity.
+        let needed = offset.checked_next_multiple_of(page)?.min(self.capacity);
 
         // Safety:
         // > `current` is page‑aligned and within the reservation.
@@ -201,7 +208,12 @@ impl BumpArenaLazy {
         }
 
         self.commit.set(needed);
-        Some(())
+        self.offset.set(offset);
+
+        unsafe {
+            let ptr = self.base.as_ptr().add(aligned);
+            Some(slice::from_raw_parts_mut(ptr.cast(), size))
+        }
     }
 
     /// Returns the OS error code from the last failed allocation or commit

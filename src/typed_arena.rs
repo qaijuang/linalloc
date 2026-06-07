@@ -168,7 +168,7 @@ impl<T> TypedArena<T> {
     /// assert_eq!(arena.len(), 0);
     /// ```
     pub fn reset(&mut self) {
-        let offset = self.offset.get();
+        let offset = self.offset.replace(0);
         unsafe {
             let start = self.base.as_ptr().cast::<T>();
             // Drop in reverse order per Rust's usual drop semantics.
@@ -176,7 +176,6 @@ impl<T> TypedArena<T> {
                 drop_in_place(start.add(i));
             }
         }
-        self.offset.set(0);
     }
 }
 
@@ -269,6 +268,31 @@ mod tests {
         arena.alloc_raw(Counter(&count)).unwrap();
         drop(arena);
         assert_eq!(count.get(), 3); // only the new one dropped
+    }
+
+    #[test]
+    fn reset_clears_len_before_dropping_values() {
+        struct PanicOnDrop<'a>(&'a Cell<u32>);
+        impl Drop for PanicOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+                panic!("drop panic");
+            }
+        }
+
+        let drops = Cell::new(0u32);
+        let mut arena = core::mem::ManuallyDrop::new(TypedArena::<PanicOnDrop>::new(2));
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.reset()));
+
+        assert!(result.is_err());
+        assert_eq!(drops.get(), 1);
+        assert_eq!(arena.len(), 0);
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut arena);
+        }
     }
 
     #[test]

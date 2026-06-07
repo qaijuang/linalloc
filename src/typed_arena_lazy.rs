@@ -144,7 +144,7 @@ impl<T> TypedArenaLazy<T> {
 
         // Ensure enough memory is committed.
         if required_bytes > self.commit.get() {
-            self.try_commit(required_bytes)?;
+            return self.alloc_raw_bump(idx, required_bytes, value);
         }
 
         // Initialise the slot.
@@ -156,9 +156,11 @@ impl<T> TypedArenaLazy<T> {
         }
     }
 
-    // With the code in `try_commit()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
+    // With the code in `alloc_raw_bump()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
     #[cold]
-    fn try_commit(&self, required_bytes: usize) -> Option<()> {
+    #[inline(never)]
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_raw_bump(&self, idx: usize, required_bytes: usize, value: T) -> Option<&mut T> {
         let page = sys::page_size();
         let current = self.commit.get();
 
@@ -167,10 +169,6 @@ impl<T> TypedArenaLazy<T> {
 
         // Next page rounding
         let needed = required_bytes.checked_next_multiple_of(page)?.min(total_bytes);
-
-        if needed <= current {
-            return Some(());
-        }
 
         // Safety:
         // > `current` is page‑aligned and within the reservation.
@@ -185,7 +183,14 @@ impl<T> TypedArenaLazy<T> {
         }
 
         self.commit.set(needed);
-        Some(())
+
+        // Initialise the slot.
+        unsafe {
+            let slot = self.base.as_ptr().add(idx);
+            let r = (&mut *slot).write(value);
+            self.offset.set(idx + 1);
+            Some(r)
+        }
     }
 
     /// Returns the OS error code from the last failed allocation or commit
@@ -270,7 +275,7 @@ impl<T> TypedArenaLazy<T> {
     /// assert_eq!(arena.len(), 0);
     /// ```
     pub fn reset(&mut self) {
-        let offset = self.offset.get();
+        let offset = self.offset.replace(0);
         unsafe {
             let start = self.base.as_ptr().cast::<T>();
             // Drop in reverse order per Rust's usual drop semantics.
@@ -278,7 +283,6 @@ impl<T> TypedArenaLazy<T> {
                 drop_in_place(start.add(i));
             }
         }
-        self.offset.set(0);
     }
 }
 
@@ -300,7 +304,7 @@ impl<T> Drop for TypedArenaLazy<T> {
 
 #[cfg(test)]
 mod tests {
-    use core::ptr;
+    use core::{mem, ptr};
 
     use super::*;
 
@@ -374,6 +378,31 @@ mod tests {
         arena.alloc_raw(Counter(&count)).unwrap();
         drop(arena);
         assert_eq!(count.get(), 3); // only the new one dropped
+    }
+
+    #[test]
+    fn reset_clears_len_before_dropping_values() {
+        struct PanicOnDrop<'a>(&'a Cell<u32>);
+        impl Drop for PanicOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+                panic!("drop panic");
+            }
+        }
+
+        let drops = Cell::new(0u32);
+        let mut arena = mem::ManuallyDrop::new(TypedArenaLazy::<PanicOnDrop>::new(2));
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.reset()));
+
+        assert!(result.is_err());
+        assert_eq!(drops.get(), 1);
+        assert_eq!(arena.len(), 0);
+        unsafe {
+            mem::ManuallyDrop::drop(&mut arena);
+        }
     }
 
     #[test]
