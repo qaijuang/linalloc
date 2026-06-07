@@ -11,11 +11,10 @@ use core::ptr::NonNull;
 ///
 /// The returned pointer is guaranteed to be page‑aligned and non‑null.
 ///
-/// # Returns
+/// # Errors
 ///
-/// `None` if the operating system fails to reserve the requested address
-/// range (e.g. out of address space).
-pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+/// Returns the OS error code if the system call fails (e.g. out of virtual address space).
+pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
     platform::reserve(size)
 }
 
@@ -34,8 +33,8 @@ pub fn reserve(size: usize) -> Option<NonNull<u8>> {
 ///
 /// # Errors
 ///
-/// Returns `Err(())` if the system call fails (e.g. out of physical memory).
-pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+/// Returns the OS error code if the system call fails (e.g. out of physical memory).
+pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
     platform::commit(addr, size)
 }
 
@@ -82,6 +81,37 @@ mod platform {
         fn munmap(addr: *mut c_void, length: usize) -> i32;
 
         fn sysconf(name: i32) -> i64;
+
+        // yanked from https://github.com/rust-lang/rust/blob/main/library/std/src/sys/io/error/unix.rs
+        #[cfg(not(any(target_os = "dragonfly", target_os = "vxworks", target_os = "rtems")))]
+        #[cfg_attr(
+            any(
+                target_os = "linux",
+                target_os = "emscripten",
+                target_os = "fuchsia",
+                target_os = "l4re",
+                target_os = "hurd",
+            ),
+            link_name = "__errno_location"
+        )]
+        #[cfg_attr(
+            any(
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "cygwin",
+                target_os = "android",
+                target_os = "redox",
+                target_os = "nuttx",
+                target_env = "newlib"
+            ),
+            link_name = "__errno"
+        )]
+        #[cfg_attr(any(target_os = "solaris", target_os = "illumos"), link_name = "___errno")]
+        #[cfg_attr(target_os = "nto", link_name = "__get_errno_ptr")]
+        #[cfg_attr(any(target_os = "freebsd", target_vendor = "apple"), link_name = "__error")]
+        #[cfg_attr(target_os = "haiku", link_name = "_errnop")]
+        #[cfg_attr(target_os = "aix", link_name = "_Errno")]
+        fn errno_location() -> *mut i32;
     }
 
     const PROT_NONE: i32 = 0;
@@ -98,7 +128,7 @@ mod platform {
 
     const _SC_PAGESIZE: i32 = 29;
 
-    pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+    pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         #[cfg(target_os = "netbsd")]
         // NetBSD allows an mmap(2) caller to specify what protection flags they
         // will use later via mprotect. It does not allow a caller to move from
@@ -114,20 +144,24 @@ mod platform {
             mmap(core::ptr::null_mut(), size, DESIRED_PROT, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
         };
         if ptr.is_null() || ptr == MAP_FAILED {
-            None
+            Err(last_os_error())
         } else {
             // SAFETY: The pointer is already checked and is not null
-            Some(unsafe { NonNull::new_unchecked(ptr.cast()) })
+            Ok(unsafe { NonNull::new_unchecked(ptr.cast()) })
         }
     }
 
-    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
         let ret = unsafe { mprotect(addr.as_ptr().cast(), size, PROT_READ | PROT_WRITE) };
-        if ret == 0 { Ok(()) } else { Err(()) }
+        if ret == 0 { Ok(()) } else { Err(last_os_error()) }
     }
 
     pub unsafe fn release(addr: NonNull<u8>, size: usize) {
         unsafe { munmap(addr.as_ptr().cast(), size) };
+    }
+
+    pub fn last_os_error() -> i32 {
+        unsafe { *errno_location() }
     }
 
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
@@ -172,6 +206,8 @@ mod platform {
         fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
 
         fn GetSystemInfo(lpSystemInfo: *mut SYSTEM_INFO);
+
+        fn GetLastError() -> u32;
     }
 
     const MEM_RESERVE: u32 = 0x0000_2000;
@@ -196,18 +232,22 @@ mod platform {
         wProcessorRevision: u16,
     }
 
-    pub fn reserve(size: usize) -> Option<NonNull<u8>> {
+    pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         let ptr = unsafe { VirtualAlloc(core::ptr::null_mut(), size, MEM_RESERVE, PAGE_NOACCESS) };
-        NonNull::new(ptr.cast())
+        NonNull::new(ptr.cast()).ok_or_else(last_os_error)
     }
 
-    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), ()> {
+    pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
         let ptr = unsafe { VirtualAlloc(addr.as_ptr().cast(), size, MEM_COMMIT, PAGE_READWRITE) };
-        if ptr.is_null() { Err(()) } else { Ok(()) }
+        if ptr.is_null() { Err(last_os_error()) } else { Ok(()) }
     }
 
     pub unsafe fn release(addr: NonNull<u8>, _size: usize) {
         unsafe { VirtualFree(addr.as_ptr().cast(), 0, MEM_RELEASE) };
+    }
+
+    pub fn last_os_error() -> i32 {
+        unsafe { GetLastError() }.cast_signed()
     }
 
     static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);

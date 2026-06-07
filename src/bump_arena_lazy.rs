@@ -51,11 +51,13 @@ use crate::sys;
 ///
 /// // Memory is freed when `bump` goes out of scope.
 /// ```
+#[cfg_attr(test, derive(Debug))]
 pub struct BumpArenaLazy {
     base: NonNull<u8>,
     capacity: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
+    last_os_error: Cell<i32>,
     _invariant: PhantomData<*const ()>,
 }
 
@@ -83,19 +85,39 @@ impl BumpArenaLazy {
     /// ```
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::try_new(capacity).expect("BumpArenaLazy::new failed to reserve memory")
+    }
+
+    /// Like [`new`], but with no panic behaviour.
+    ///
+    /// # Errors
+    ///
+    /// Returns OS error code if reservation fails.
+    ///
+    /// [`new`]: BumpArenaLazy::new
+    pub fn try_new(capacity: usize) -> Result<Self, i32> {
         // saves us one unnecessary syscall.
         if capacity == 0 {
-            return Self {
+            return Ok(Self {
                 base: NonNull::dangling(),
                 capacity: 0,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
+                last_os_error: Cell::new(0),
                 _invariant: PhantomData,
-            };
+            });
         }
 
-        let base = sys::reserve(capacity).expect("BumpArenaLazy: out of virtual address space");
-        Self { base, capacity, offset: Cell::new(0), commit: Cell::new(0), _invariant: PhantomData }
+        let base = sys::reserve(capacity)?;
+
+        Ok(Self {
+            base,
+            capacity,
+            offset: Cell::new(0),
+            commit: Cell::new(0),
+            last_os_error: Cell::new(0),
+            _invariant: PhantomData,
+        })
     }
 
     /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
@@ -142,7 +164,7 @@ impl BumpArenaLazy {
         }
 
         if offset > self.commit.get() {
-            self.try_commit(offset)?;
+            return self.alloc_uninit_slice_bump(aligned, offset, size);
         }
         self.offset.set(offset);
 
@@ -156,14 +178,21 @@ impl BumpArenaLazy {
         }
     }
 
-    // With the code in `try_commit()` out of the way, `alloc_uninit_slice()` compiles down to some super tight assembly.
+    // With the code in `alloc_uninit_slice_bump()` out of the way, `alloc_uninit_slice()` compiles down to some super tight assembly.
     #[cold]
-    fn try_commit(&self, required_offset: usize) -> Option<()> {
+    #[inline(never)]
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_uninit_slice_bump(
+        &self,
+        aligned: usize,
+        offset: usize,
+        size: usize,
+    ) -> Option<&mut [MaybeUninit<u8>]> {
         let page = sys::page_size();
         let current = self.commit.get();
 
-        // Round required_offset up to the next page boundary, capped by capacity.
-        let needed = required_offset.checked_next_multiple_of(page)?.min(self.capacity);
+        // Round offset up to the next page boundary, capped by capacity.
+        let needed = offset.checked_next_multiple_of(page)?.min(self.capacity);
 
         // Safety:
         // > `current` is page‑aligned and within the reservation.
@@ -171,11 +200,42 @@ impl BumpArenaLazy {
         // > The range has not been committed before, so no overlapping commit.
         unsafe {
             let addr = NonNull::new_unchecked(self.base.as_ptr().add(current));
-            sys::commit(addr, needed - current).ok()?;
+            if let Err(code) = sys::commit(addr, needed - current) {
+                // capture the OS error code immediately
+                self.last_os_error.set(code);
+                return None;
+            }
         }
 
         self.commit.set(needed);
-        Some(())
+        self.offset.set(offset);
+
+        unsafe {
+            let ptr = self.base.as_ptr().add(aligned);
+            Some(slice::from_raw_parts_mut(ptr.cast(), size))
+        }
+    }
+
+    /// Returns the OS error code from the last failed allocation or commit
+    /// operation, if any.
+    ///
+    /// The returned value is the raw platform‑specific error code:
+    /// - On Unix: the `errno` value (positive integer).
+    /// - On Windows: the `GetLastError` code.
+    ///
+    /// Returns `None` if no OS-backed reserve or commit failure has been
+    /// recorded for this arena.
+    ///
+    /// # Semantics
+    ///
+    /// This method behaves analogously to [`std::io::Error::last_os_error`] at
+    /// the point of the failed internal system call. The error code is stable
+    /// until the next failure overwrites it.
+    ///
+    /// [`std::io::Error::last_os_error`]: std::io::Error::last_os_error
+    pub fn last_os_error_code(&self) -> Option<i32> {
+        let code = self.last_os_error.get();
+        if code == 0 { None } else { Some(code) }
     }
 
     /// Resets the bump pointer to the beginning, reusing already‑committed

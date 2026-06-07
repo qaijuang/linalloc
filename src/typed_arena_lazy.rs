@@ -35,11 +35,13 @@ use crate::sys;
 ///
 /// // All values are dropped when `arena` goes out of scope.
 /// ```
+#[cfg_attr(test, derive(Debug))]
 pub struct TypedArenaLazy<T> {
     base: NonNull<MaybeUninit<T>>,
     capacity: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
+    last_os_error: Cell<i32>,
     #[allow(clippy::type_complexity)]
     _invariant: PhantomData<(*const (), fn(T) -> T)>,
 }
@@ -59,27 +61,44 @@ impl<T> TypedArenaLazy<T> {
     /// range, or if the required byte size overflows.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::try_new(capacity).expect("TypedArenaLazy::new failed to reserve memory")
+    }
+
+    /// Like [`new`], but returns a `Result`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the required byte size overflows.
+    ///
+    /// # Errors
+    ///
+    /// Returns OS error code if reservation fails.
+    ///
+    /// [`new`]: TypedArenaLazy::new
+    pub fn try_new(capacity: usize) -> Result<Self, i32> {
         if capacity == 0 || size_of::<T>() == 0 {
-            return Self {
+            return Ok(Self {
                 base: NonNull::dangling(),
                 capacity,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
+                last_os_error: Cell::new(0),
                 _invariant: PhantomData,
-            };
+            });
         }
 
         let size_bytes =
             capacity.checked_mul(size_of::<T>()).expect("TypedArenaLazy: capacity overflow");
-        let base = sys::reserve(size_bytes).expect("TypedArenaLazy: out of virtual address space");
+        let base = sys::reserve(size_bytes)?;
 
-        Self {
+        Ok(Self {
             base: base.cast(),
             capacity,
             offset: Cell::new(0),
             commit: Cell::new(0),
+            last_os_error: Cell::new(0),
             _invariant: PhantomData,
-        }
+        })
     }
 
     /// Allocates a new `T` by moving `value` into the arena.
@@ -125,7 +144,7 @@ impl<T> TypedArenaLazy<T> {
 
         // Ensure enough memory is committed.
         if required_bytes > self.commit.get() {
-            self.try_commit(required_bytes)?;
+            return self.alloc_raw_bump(idx, required_bytes, value);
         }
 
         // Initialise the slot.
@@ -137,9 +156,11 @@ impl<T> TypedArenaLazy<T> {
         }
     }
 
-    // With the code in `try_commit()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
+    // With the code in `alloc_raw_bump()` out of the way, `alloc_raw()` compiles down to some super tight assembly.
     #[cold]
-    fn try_commit(&self, required_bytes: usize) -> Option<()> {
+    #[inline(never)]
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_raw_bump(&self, idx: usize, required_bytes: usize, value: T) -> Option<&mut T> {
         let page = sys::page_size();
         let current = self.commit.get();
 
@@ -149,20 +170,49 @@ impl<T> TypedArenaLazy<T> {
         // Next page rounding
         let needed = required_bytes.checked_next_multiple_of(page)?.min(total_bytes);
 
-        if needed <= current {
-            return Some(());
-        }
-
         // Safety:
         // > `current` is page‑aligned and within the reservation.
         // > `needed - current` is a multiple of the page size.
         unsafe {
             let addr = NonNull::new_unchecked(self.base.as_ptr().cast::<u8>().add(current));
-            sys::commit(addr, needed - current).ok()?;
+            if let Err(code) = sys::commit(addr, needed - current) {
+                // capture the OS error code immediately
+                self.last_os_error.set(code);
+                return None;
+            }
         }
 
         self.commit.set(needed);
-        Some(())
+
+        // Initialise the slot.
+        unsafe {
+            let slot = self.base.as_ptr().add(idx);
+            let r = (&mut *slot).write(value);
+            self.offset.set(idx + 1);
+            Some(r)
+        }
+    }
+
+    /// Returns the OS error code from the last failed allocation or commit
+    /// operation, if any.
+    ///
+    /// The returned value is the raw platform‑specific error code:
+    /// - On Unix: the `errno` value (positive integer).
+    /// - On Windows: the `GetLastError` code.
+    ///
+    /// Returns `None` if no OS-backed reserve or commit failure has been
+    /// recorded for this arena.
+    ///
+    /// # Semantics
+    ///
+    /// This method behaves analogously to [`std::io::Error::last_os_error`] at
+    /// the point of the failed internal system call. The error code is stable
+    /// until the next failure overwrites it.
+    ///
+    /// [`std::io::Error::last_os_error`]: std::io::Error::last_os_error
+    pub fn last_os_error_code(&self) -> Option<i32> {
+        let code = self.last_os_error.get();
+        if code == 0 { None } else { Some(code) }
     }
 
     /// Returns the number of elements currently allocated in the arena.
@@ -225,7 +275,7 @@ impl<T> TypedArenaLazy<T> {
     /// assert_eq!(arena.len(), 0);
     /// ```
     pub fn reset(&mut self) {
-        let offset = self.offset.get();
+        let offset = self.offset.replace(0);
         unsafe {
             let start = self.base.as_ptr().cast::<T>();
             // Drop in reverse order per Rust's usual drop semantics.
@@ -233,7 +283,6 @@ impl<T> TypedArenaLazy<T> {
                 drop_in_place(start.add(i));
             }
         }
-        self.offset.set(0);
     }
 }
 
@@ -255,7 +304,7 @@ impl<T> Drop for TypedArenaLazy<T> {
 
 #[cfg(test)]
 mod tests {
-    use core::ptr;
+    use core::{mem, ptr};
 
     use super::*;
 
@@ -329,6 +378,31 @@ mod tests {
         arena.alloc_raw(Counter(&count)).unwrap();
         drop(arena);
         assert_eq!(count.get(), 3); // only the new one dropped
+    }
+
+    #[test]
+    fn reset_clears_len_before_dropping_values() {
+        struct PanicOnDrop<'a>(&'a Cell<u32>);
+        impl Drop for PanicOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+                panic!("drop panic");
+            }
+        }
+
+        let drops = Cell::new(0u32);
+        let mut arena = mem::ManuallyDrop::new(TypedArenaLazy::<PanicOnDrop>::new(2));
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.reset()));
+
+        assert!(result.is_err());
+        assert_eq!(drops.get(), 1);
+        assert_eq!(arena.len(), 0);
+        unsafe {
+            mem::ManuallyDrop::drop(&mut arena);
+        }
     }
 
     #[test]
