@@ -82,6 +82,30 @@ linalloc = { version = "1.0", features = ["lazy"] }
 
 The lazy feature is supported on Unix and Windows targets.
 
+## Read lazy OS errors
+
+Lazy arenas keep the raw OS code from the last failed reserve or commit call.
+Use it when `try_new` fails, or when allocation returns `None` and you need to
+know whether the OS refused more committed memory.
+
+```rust
+#[cfg(all(feature = "lazy", any(unix, windows), not(miri)))]
+{
+    use core::alloc::Layout;
+
+    use linalloc::{BumpArenaLazy, TypedArenaLazy};
+
+    if let Err(code) = BumpArenaLazy::try_new(usize::MAX) {
+        assert_eq!(Some(code), std::io::Error::last_os_error().raw_os_error());
+    }
+
+    let typed = TypedArenaLazy::<u8>::new(1);
+    assert!(typed.alloc_raw(1).is_some());
+    assert!(typed.alloc_raw(2).is_none());
+    assert_eq!(typed.last_os_error_code(), None);
+}
+```
+
 ## Safety
 
 Untyped arenas hand you uninitialized bytes. Do not read them until you have
