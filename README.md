@@ -77,7 +77,7 @@ commit physical memory only as allocation advances:
 
 ```toml
 [dependencies]
-linalloc = { version = "1.0", features = ["lazy"] }
+linalloc = { version = "1", features = ["lazy"] }
 ```
 
 The lazy feature is supported on Unix and Windows targets.
