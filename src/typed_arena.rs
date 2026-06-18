@@ -37,6 +37,7 @@ use core::ptr::{NonNull, drop_in_place};
 ///
 /// [`alloc_raw`]: TypedArena::alloc_raw
 /// [`reset`]: TypedArena::reset
+#[derive(Debug)]
 pub struct TypedArena<T> {
     base: NonNull<[MaybeUninit<T>]>,
     offset: Cell<usize>,

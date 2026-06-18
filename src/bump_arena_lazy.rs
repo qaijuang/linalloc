@@ -51,7 +51,7 @@ use crate::sys;
 ///
 /// // Memory is freed when `bump` goes out of scope.
 /// ```
-#[cfg_attr(test, derive(Debug))]
+#[derive(Debug)]
 pub struct BumpArenaLazy {
     base: NonNull<u8>,
     capacity: usize,

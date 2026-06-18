@@ -38,6 +38,7 @@ use core::slice;
 ///
 /// // Memory is freed when `bump` goes out of scope.
 /// ```
+#[derive(Debug)]
 pub struct BumpArena {
     base: NonNull<[MaybeUninit<u8>]>,
     offset: Cell<usize>,

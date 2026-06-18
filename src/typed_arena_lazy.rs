@@ -35,7 +35,7 @@ use crate::sys;
 ///
 /// // All values are dropped when `arena` goes out of scope.
 /// ```
-#[cfg_attr(test, derive(Debug))]
+#[derive(Debug)]
 pub struct TypedArenaLazy<T> {
     base: NonNull<MaybeUninit<T>>,
     capacity: usize,
