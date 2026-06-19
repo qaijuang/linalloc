@@ -7,9 +7,9 @@ use core::ptr::{NonNull, drop_in_place};
 /// type `T` and automatically drops them in reverse allocation order.
 ///
 /// The backing store is a `NonNull<[MaybeUninit<T>]>` whose capacity is
-/// set at construction.  Each call to [`alloc_raw`] writes a value into
-/// the next free slot and returns a mutable reference.  When the
-/// arena is dropped (or when [`reset`] is called), all live values
+/// set at construction. Each call to [`TypedArena::try_alloc`] writes a value into
+/// the next free slot and returns a mutable reference. When the
+/// arena is dropped (or when [`TypedArena::reset`] is called), all live values
 /// are dropped and the memory is made available for reuse.
 ///
 /// # Invariance and thread safety
@@ -29,14 +29,11 @@ use core::ptr::{NonNull, drop_in_place};
 ///
 /// let mut arena = TypedArena::<String>::new(5);
 ///
-/// let s = arena.alloc_raw("hello".to_string()).unwrap();
+/// let s = arena.try_alloc("hello".to_string()).unwrap();
 /// assert_eq!(s, "hello");
 ///
 /// // All values are dropped when `arena` goes out of scope.
 /// ```
-///
-/// [`alloc_raw`]: TypedArena::alloc_raw
-/// [`reset`]: TypedArena::reset
 #[derive(Debug)]
 pub struct TypedArena<T> {
     base: NonNull<[MaybeUninit<T>]>,
@@ -81,11 +78,32 @@ impl<T> TypedArena<T> {
     /// use linalloc::TypedArena;
     ///
     /// let arena = TypedArena::<i32>::new(10);
-    /// let x = arena.alloc_raw(42).unwrap();
+    /// let x = arena.try_alloc(42).unwrap();
     /// assert_eq!(*x, 42);
     /// ```
-    #[allow(clippy::mut_from_ref)]
+    #[deprecated(since = "1.1.1", note = "Use `TypedArena::try_alloc` instead.")]
     pub fn alloc_raw(&self, value: T) -> Option<&mut T> {
+        self.alloc_impl(value)
+    }
+
+    /// Just like [`TypedArena::try_alloc`], but panics
+    /// when the arena capacity is full.
+    ///
+    /// # Panics
+    ///
+    /// If `TypedArena::len() == TypedArena::capacity()`.
+    pub fn alloc(&self, value: T) -> &mut T {
+        self.alloc_impl(value).expect("TypedArena capacity is full")
+    }
+
+    /// A carbon copy of [`TypedArena::alloc_raw`], but with a
+    /// more bespoke name and will likely be the stable API going forward.
+    pub fn try_alloc(&self, value: T) -> Option<&mut T> {
+        self.alloc_impl(value)
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_impl(&self, value: T) -> Option<&mut T> {
         if size_of::<T>() == 0 {
             unsafe {
                 let dangling = NonNull::<T>::dangling();
@@ -121,7 +139,7 @@ impl<T> TypedArena<T> {
     ///
     /// let mut arena = TypedArena::<i32>::new(10);
     /// assert_eq!(arena.len(), 0);
-    /// arena.alloc_raw(1);
+    /// arena.try_alloc(1);
     /// assert_eq!(arena.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
@@ -137,7 +155,7 @@ impl<T> TypedArena<T> {
     ///
     /// let arena = TypedArena::<i32>::new(10);
     /// assert!(arena.is_empty());
-    /// arena.alloc_raw(1);
+    /// arena.try_alloc(1);
     /// assert!(!arena.is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
@@ -154,7 +172,7 @@ impl<T> TypedArena<T> {
     ///
     /// Because this method takes `&mut self`, the borrow checker
     /// guarantees that no references to the arena's contents are
-    /// currently alive.  After the call, `len()` returns `0`.
+    /// currently alive. After the call, `len()` returns `0`.
     ///
     /// # Examples
     ///
@@ -163,7 +181,7 @@ impl<T> TypedArena<T> {
     ///
     /// let mut arena = TypedArena::<Vec<i32>>::new(5);
     /// {
-    ///     let v = arena.alloc_raw(vec![1, 2, 3]).unwrap();
+    ///     let v = arena.try_alloc(vec![1, 2, 3]).unwrap();
     /// } // v goes out of scope -- can call `reset` now.
     /// arena.reset();
     /// assert_eq!(arena.len(), 0);
@@ -218,9 +236,9 @@ mod tests {
         let order = Cell::new(Vec::new());
         let arena = TypedArena::<DropTracker>::new(10);
 
-        arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap();
-        arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap();
-        arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap();
+        arena.try_alloc(DropTracker { id: 1, order: &order }).unwrap();
+        arena.try_alloc(DropTracker { id: 2, order: &order }).unwrap();
+        arena.try_alloc(DropTracker { id: 3, order: &order }).unwrap();
 
         drop(arena);
 
@@ -232,8 +250,8 @@ mod tests {
         let order = Cell::new(Vec::new());
 
         let mut arena = TypedArena::<DropTracker>::new(10);
-        let ptr1 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 1, order: &order }).unwrap());
-        let _ptr2 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 2, order: &order }).unwrap());
+        let ptr1 = ptr::from_mut(arena.try_alloc(DropTracker { id: 1, order: &order }).unwrap());
+        let _ptr2 = ptr::from_mut(arena.try_alloc(DropTracker { id: 2, order: &order }).unwrap());
 
         arena.reset();
 
@@ -241,7 +259,7 @@ mod tests {
         assert_eq!(order.take(), vec![2, 1]);
 
         // New allocation reuses the first slot.
-        let ptr3 = ptr::from_mut(arena.alloc_raw(DropTracker { id: 3, order: &order }).unwrap());
+        let ptr3 = ptr::from_mut(arena.try_alloc(DropTracker { id: 3, order: &order }).unwrap());
         assert_eq!(ptr1, ptr3);
 
         drop(arena);
@@ -260,13 +278,13 @@ mod tests {
         let count = Cell::new(0u32);
 
         let mut arena = TypedArena::<Counter>::new(10);
-        arena.alloc_raw(Counter(&count)).unwrap();
-        arena.alloc_raw(Counter(&count)).unwrap();
+        arena.try_alloc(Counter(&count)).unwrap();
+        arena.try_alloc(Counter(&count)).unwrap();
 
         arena.reset();
         assert_eq!(count.get(), 2); // both dropped exactly once
 
-        arena.alloc_raw(Counter(&count)).unwrap();
+        arena.try_alloc(Counter(&count)).unwrap();
         drop(arena);
         assert_eq!(count.get(), 3); // only the new one dropped
     }
@@ -283,8 +301,8 @@ mod tests {
 
         let drops = Cell::new(0u32);
         let mut arena = core::mem::ManuallyDrop::new(TypedArena::<PanicOnDrop>::new(2));
-        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
-        arena.alloc_raw(PanicOnDrop(&drops)).unwrap();
+        arena.try_alloc(PanicOnDrop(&drops)).unwrap();
+        arena.try_alloc(PanicOnDrop(&drops)).unwrap();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.reset()));
 
@@ -299,25 +317,25 @@ mod tests {
     #[test]
     fn oom_does_not_advance_offset() {
         let arena = TypedArena::<u64>::new(1); // holds exactly 1 u64
-        assert!(arena.alloc_raw(1u64).is_some());
+        assert!(arena.try_alloc(1u64).is_some());
         assert_eq!(arena.len(), 1);
-        assert!(arena.alloc_raw(2u64).is_none());
+        assert!(arena.try_alloc(2u64).is_none());
         assert_eq!(arena.len(), 1);
     }
 
     #[test]
     fn zst_does_not_advance_offset() {
         let arena = TypedArena::<()>::new(0);
-        assert!(arena.alloc_raw(()).is_some());
+        assert!(arena.try_alloc(()).is_some());
         assert_eq!(arena.len(), 0);
-        assert!(arena.alloc_raw(()).is_some());
+        assert!(arena.try_alloc(()).is_some());
         assert_eq!(arena.len(), 0);
     }
 
     #[test]
     fn allocated_value_is_valid() {
         let arena = TypedArena::<String>::new(1);
-        let s = arena.alloc_raw("hello".to_string()).unwrap();
+        let s = arena.try_alloc("hello".to_string()).unwrap();
         assert_eq!(s, "hello");
         s.push_str(" world");
         assert_eq!(s, "hello world");

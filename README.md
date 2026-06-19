@@ -87,7 +87,7 @@ the arena is reset or dropped.
 use linalloc::TypedArena;
 
 let arena = TypedArena::<String>::new(4);
-let value = arena.alloc_raw("hello".to_owned()).unwrap();
+let value = arena.try_alloc("hello".to_owned()).unwrap();
 
 value.push_str(" world");
 assert_eq!(value, "hello world");
@@ -100,7 +100,7 @@ are still live:
 use linalloc::TypedArena;
 
 let mut arena = TypedArena::<String>::new(1);
-let value = arena.alloc_raw("held".to_owned()).unwrap();
+let value = arena.try_alloc("held".to_owned()).unwrap();
 //          ----- immutable borrow occurs here
 arena.reset();
 //^^^^^^^^^^^^^ mutable borrow occurs here
