@@ -308,3 +308,32 @@ impl<'a, T, A: UninitAllocator + 'a> IntoIterator for TypedArenaRef<'a, T, A> {
         IntoIter { allocator: this.allocator, pointers: pointers.into_iter() }
     }
 }
+
+impl<'a, T, A: UninitAllocator + 'a> DoubleEndedIterator for IntoIter<'a, T, A> {
+    /// Removes and returns an element from the back of the iterator.
+    ///
+    /// This yields the elements in **forward allocation order** -- the first
+    /// allocated element is returned first, which is the reverse of the
+    /// default iteration order (LIFO).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::{BumpArena, TypedArenaRef};
+    ///
+    /// let bump = BumpArena::new(128);
+    /// let mut arena = TypedArenaRef::<String, _>::new_in(&bump);
+    /// arena.try_alloc("first".to_string()).unwrap();
+    /// arena.try_alloc("second".to_string()).unwrap();
+    ///
+    /// let mut iter = arena.into_iter();
+    /// assert_eq!(iter.next_back(), Some("first".to_string())); // forward
+    /// assert_eq!(iter.next(), Some("second".to_string())); // LIFO
+    /// ```
+    fn next_back(&mut self) -> Option<T> {
+        let ptr = self.pointers.next_back()?;
+        // SAFETY: The pointer is valid and points to an initialised `T`.
+        // See `next` for the full safety argument.
+        Some(unsafe { ptr::read(ptr) })
+    }
+}
