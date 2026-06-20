@@ -1,8 +1,8 @@
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::size_of;
-use core::ptr::drop_in_place;
+use core::mem::{self, size_of};
+use core::ptr::{self, drop_in_place};
 
 use crate::UninitAllocator;
 
@@ -121,7 +121,7 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
         // destructors and no drop glue.
         if size_of::<T>() == 0 {
             unsafe {
-                let dangling = core::ptr::NonNull::<T>::dangling();
+                let dangling = ptr::NonNull::<T>::dangling();
                 dangling.as_ptr().write(value);
                 return Some(&mut *dangling.as_ptr());
             }
@@ -203,5 +203,108 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
 impl<'a, T, A: UninitAllocator + 'a> Drop for TypedArenaRef<'a, T, A> {
     fn drop(&mut self) {
         self.reset();
+    }
+}
+
+/// An iterator that yields the elements of a consumed [`TypedArenaRef`].
+///
+/// This struct is created by the [`TypedArenaRef::into_iter`]
+/// (provided by the [`IntoIterator`] trait). It yields the allocated values
+/// in **reverse allocation order** -- the most recently allocated element is
+/// returned first.
+///
+/// # Thread safety
+///
+/// `IntoIter` is **`!Send` and `!Sync`** -- the arena is single‑threaded and
+/// this iterator must remain on the thread where it was created.
+pub struct IntoIter<'a, T, A: UninitAllocator + 'a> {
+    // keeps the backing memory alive
+    allocator: &'a A,
+    // the remaining raw pointers (in reverse order)
+    pointers: std::vec::IntoIter<*mut T>,
+}
+
+impl<'a, T, A: UninitAllocator + 'a> IntoIter<'a, T, A> {
+    /// Returns a reference to the backing allocator.
+    #[must_use]
+    pub fn allocator(&self) -> &A {
+        self.allocator
+    }
+}
+
+impl<'a, T, A: UninitAllocator + 'a> Iterator for IntoIter<'a, T, A> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        let ptr = self.pointers.next()?;
+        // SAFETY: The pointer comes from the tracking list and points to a
+        // valid, initialised `T`. The backing memory is still alive (guaranteed
+        // by `allocator`). No other reference to this memory exists.
+        Some(unsafe { ptr::read(ptr) })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.pointers.size_hint()
+    }
+}
+
+impl<'a, T, A: UninitAllocator + 'a> Drop for IntoIter<'a, T, A> {
+    fn drop(&mut self) {
+        // Drop any remaining elements to prevent leaks.
+        for ptr in self.pointers.by_ref() {
+            // SAFETY: The pointer is valid and points to an initialised `T`.
+            unsafe {
+                ptr::drop_in_place(ptr);
+            }
+        }
+    }
+}
+
+impl<'a, T, A: UninitAllocator + 'a> IntoIterator for TypedArenaRef<'a, T, A> {
+    type Item = T;
+    type IntoIter = IntoIter<'a, T, A>;
+
+    /// Consumes the arena and returns an iterator over its allocated values in
+    /// reverse allocation order.
+    ///
+    /// The iterator yields **owned** values. The memory in the backing
+    /// allocator is **not** freed -- it stays reserved and can be reused after
+    /// a manual reset of the underlying bump allocator (once all references to
+    /// the memory have ended).
+    ///
+    /// If the iterator is dropped before it is fully consumed, the remaining
+    /// elements are automatically dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::{BumpArena, TypedArenaRef};
+    ///
+    /// let bump = BumpArena::new(128);
+    /// let mut arena = TypedArenaRef::<String, _>::new_in(&bump);
+    ///
+    /// arena.try_alloc("foo".to_string()).unwrap();
+    /// arena.try_alloc("bar".to_string()).unwrap();
+    ///
+    /// // Consume the arena.
+    /// let s = arena.into_iter().collect::<Vec<_>>();
+    /// assert_eq!(s, ["bar", "foo"]);
+    /// ```
+    fn into_iter(self) -> IntoIter<'a, T, A> {
+        // Prevent the TypedArenaRef's Drop from running -- we are taking over
+        // ownership of the tracking list and the responsibility for dropping
+        // the values.
+        let this = mem::ManuallyDrop::new(self);
+
+        // SAFETY: `allocations` is a `UnsafeCell<Vec<*mut T>>` and we have
+        // exclusive access to the arena (it is being consumed). Moving the
+        // `Vec` out of the `UnsafeCell` is sound.
+        let allocations = unsafe { ptr::read(this.allocations.get()) };
+
+        // Build a vector of pointers in reverse allocation order so that the
+        // iterator yields the most recently allocated element first.
+        let pointers: Vec<*mut T> = allocations.into_iter().rev().collect();
+
+        IntoIter { allocator: this.allocator, pointers: pointers.into_iter() }
     }
 }
