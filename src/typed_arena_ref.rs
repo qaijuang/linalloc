@@ -74,6 +74,16 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
         Self { allocator, allocations: UnsafeCell::new(Vec::new()), _marker: PhantomData }
     }
 
+    /// Just like [`TypedArenaRef::try_alloc`], but panics
+    /// when allocation fails.
+    ///
+    /// # Panics
+    ///
+    /// if the backing allocator cannot satisfy the allocation request.
+    pub fn alloc(&self, value: T) -> &mut T {
+        self.alloc_impl(value).expect("TypedArenaRef allocation failed")
+    }
+
     /// Allocates a new `T` by moving `value` into the arena.
     ///
     /// The returned mutable reference borrows the `TypedArenaRef` immutably
@@ -99,8 +109,12 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
     /// let x = arena.try_alloc(42).unwrap();
     /// assert_eq!(*x, 42);
     /// ```
-    #[allow(clippy::mut_from_ref)]
     pub fn try_alloc(&self, value: T) -> Option<&mut T> {
+        self.alloc_impl(value)
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_impl(&self, value: T) -> Option<&mut T> {
         // Zero‑sized types never consume memory -- they just write to a
         // dangling pointer. No tracking is necessary because ZSTs have no
         // destructors and no drop glue.
