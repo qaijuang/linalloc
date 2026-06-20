@@ -144,6 +144,11 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
         }
     }
 
+    /// Returns a reference to the backing allocator.
+    pub fn allocator(&self) -> &A {
+        self.allocator
+    }
+
     /// Returns the number of elements currently allocated in this arena.
     pub fn len(&self) -> usize {
         // Safety: we only read the length, which is a plain integer access
