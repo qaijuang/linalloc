@@ -54,6 +54,7 @@ use crate::UninitAllocator;
 /// // The bump memory is still allocated, but no live objects remain.
 /// unsafe { bump.reset() }; // safe because all references have ended
 /// ```
+#[derive(Debug)]
 pub struct TypedArenaRef<'a, T, A: UninitAllocator + 'a> {
     allocator: &'a A,
     // Tracks the addresses of every allocated `T`. Interior mutability via
