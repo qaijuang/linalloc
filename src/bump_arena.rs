@@ -171,7 +171,7 @@ unsafe impl UninitAllocator for BumpArena {
 // `shrink` only resize the most recent allocation in place when it is the last
 // block.
 #[cfg(feature = "nightly")]
-unsafe impl core::alloc::Allocator for &BumpArena {
+unsafe impl core::alloc::Allocator for BumpArena {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let slice = self.alloc_uninit_slice(layout).ok_or(core::alloc::AllocError)?;
         // SAFETY: `slice` is guaranteed to be non-null and valid for `layout.size()` bytes.
@@ -442,7 +442,7 @@ mod tests {
         let used = bump.used();
         let grown = Layout::from_size_align(16, 8).unwrap();
 
-        assert!(unsafe { (&bump).grow(ptr, old, grown) }.is_err());
+        assert!(unsafe { bump.grow(ptr, old, grown) }.is_err());
         assert_eq!(bump.used(), used);
 
         let bump = BumpArena::new(256);
@@ -450,7 +450,7 @@ mod tests {
         let used = bump.used();
         let shrunk = Layout::from_size_align(4, 8).unwrap();
 
-        assert!(unsafe { (&bump).shrink(ptr, old, shrunk) }.is_err());
+        assert!(unsafe { bump.shrink(ptr, old, shrunk) }.is_err());
         assert_eq!(bump.used(), used);
     }
 }
