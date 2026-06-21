@@ -5,7 +5,7 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
 
-use crate::sys;
+use crate::{UninitAllocator, sys};
 
 /// A fixed‑capacity, single‑threaded bump allocator backed by lazy‑committed
 /// virtual memory.
@@ -273,6 +273,13 @@ impl Drop for BumpArenaLazy {
                 sys::release(self.base, self.capacity);
             }
         }
+    }
+}
+
+// Safety: all safety invariants required by `UninitAllocator` are upheld by `BumpArenaLazy`.
+unsafe impl UninitAllocator for BumpArenaLazy {
+    fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+        self.alloc_uninit_slice(layout)
     }
 }
 

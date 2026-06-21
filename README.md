@@ -13,12 +13,13 @@ Addresses stay stable. When it is full, allocation returns `None`.
 
 ## Choose an arena
 
-| Type                | Feature | What it gives you                                | Drop behavior                                 |
-| ------------------- | ------- | ------------------------------------------------ | --------------------------------------------- |
-| `BumpArena`         | default | Raw byte allocation from a fixed heap buffer     | Values must be dropped by the caller          |
-| `TypedArena<T>`     | default | Values of one type from a fixed heap buffer      | Drops live values in reverse allocation order |
-| `BumpArenaLazy`     | `lazy`  | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
-| `TypedArenaLazy<T>` | `lazy`  | Values of one type from reserved virtual memory  | Drops live values in reverse allocation order |
+| Type                      | Feature | What it gives you                                | Drop behavior                                 |
+| ------------------------- | ------- | ------------------------------------------------ | --------------------------------------------- |
+| `BumpArena`               | default | Raw byte allocation from a fixed heap buffer     | Values must be dropped by the caller          |
+| `TypedArena<T>`           | default | Values of one type from a fixed heap buffer      | Drops live values in reverse allocation order |
+| `BumpArenaLazy`           | `lazy`  | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
+| `TypedArenaLazy<T>`       | `lazy`  | Values of one type from reserved virtual memory  | Drops live values in reverse allocation order |
+| `TypedArenaRef<'a, T, A>` | default | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
 
 All arenas are `!Send` and `!Sync`. They are deliberately single-threaded.
 
@@ -68,6 +69,25 @@ arena.reset();
 //^^^^^^^^^^^^^ mutable borrow occurs here
 drop(value);
 //   ----- immutable borrow later used here
+```
+
+## Use a typed arena with a backing allocator
+
+`TypedArenaRef<'a, T, A>` stores initialized `T` values in a backing allocator
+`A` that implements the `UninitAllocator` trait and drops the live values when the arena is reset or dropped.
+
+```rust
+use linalloc::{BumpArena, TypedArenaRef};
+
+let bump = BumpArena::new(128); // Implements `UninitAllocator`
+let mut foo_arena = TypedArenaRef::<String, _>::new_in(&bump);
+let mut bar_arena = TypedArenaRef::<String, _>::new_in(&bump);
+
+let foo = foo_arena.try_alloc("foo".to_owned()).unwrap();
+let bar = bar_arena.try_alloc("bar".to_owned()).unwrap();
+
+assert_eq!(foo, "foo");
+assert_eq!(bar, "bar");
 ```
 
 ## Use lazy arenas

@@ -5,6 +5,8 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
 
+use crate::UninitAllocator;
+
 /// A fixed‑capacity, single‑threaded bump allocator.
 ///
 /// The arena hands out mutable slices of [`MaybeUninit<u8>`] that
@@ -150,6 +152,13 @@ impl Drop for BumpArena {
         unsafe {
             drop(Box::from_raw(self.base.as_ptr()));
         }
+    }
+}
+
+// Safety: all safety invariants required by `UninitAllocator` are upheld by `BumpArena`.
+unsafe impl UninitAllocator for BumpArena {
+    fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+        self.alloc_uninit_slice(layout)
     }
 }
 
