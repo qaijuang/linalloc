@@ -3,6 +3,7 @@ use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::mem::{self, size_of};
 use core::ptr::{self, drop_in_place};
+use std::vec;
 
 use crate::UninitAllocator;
 
@@ -221,7 +222,7 @@ pub struct IntoIter<'a, T, A: UninitAllocator + 'a> {
     // keeps the backing memory alive
     allocator: &'a A,
     // the remaining raw pointers (in reverse order)
-    pointers: std::vec::IntoIter<*mut T>,
+    pointers: vec::IntoIter<*mut T>,
 }
 
 impl<'a, T, A: UninitAllocator + 'a> IntoIter<'a, T, A> {
@@ -309,6 +310,36 @@ impl<'a, T, A: UninitAllocator + 'a> IntoIterator for TypedArenaRef<'a, T, A> {
     }
 }
 
+impl<'a, T, A: UninitAllocator + 'a> IntoIterator for &'a TypedArenaRef<'a, T, A> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    /// Returns an iterator over the allocated values in reverse allocation
+    /// order (LIFO).
+    ///
+    /// The iterator yields `&T` and borrows the arena immutably. New
+    /// allocations are possible while the iterator is alive, but they will
+    /// not appear in this iterator because it captures a snapshot of the
+    /// current state.
+    fn into_iter(self) -> Iter<'a, T> {
+        self.iter()
+    }
+}
+
+impl<'a, T, A: UninitAllocator + 'a> IntoIterator for &'a mut TypedArenaRef<'a, T, A> {
+    type Item = &'a mut T;
+    type IntoIter = IterMut<'a, T>;
+
+    /// Returns a mutable iterator over the allocated values in reverse
+    /// allocation order (LIFO).
+    ///
+    /// The iterator yields `&mut T` and borrows the arena mutably. No other
+    /// allocations or resets are possible while the iterator is alive.
+    fn into_iter(self) -> IterMut<'a, T> {
+        self.iter_mut()
+    }
+}
+
 impl<'a, T, A: UninitAllocator + 'a> DoubleEndedIterator for IntoIter<'a, T, A> {
     /// Removes and returns an element from the back of the iterator.
     ///
@@ -335,5 +366,147 @@ impl<'a, T, A: UninitAllocator + 'a> DoubleEndedIterator for IntoIter<'a, T, A> 
         // SAFETY: The pointer is valid and points to an initialised `T`.
         // See `next` for the full safety argument.
         Some(unsafe { ptr::read(ptr) })
+    }
+}
+
+/// An immutable iterator over the elements of a [`TypedArenaRef`].
+///
+/// This iterator yields `&T` in **reverse allocation order** (LIFO).
+/// It borrows the arena immutably, so the arena cannot be dropped while
+/// the iterator exists. New allocations **are** allowed; they will not
+/// appear in this iterator because it operates on a snapshot of the
+/// tracking list taken at creation time.
+///
+/// # Thread safety
+///
+/// `Iter` is `!Send` and `!Sync` -- the contained raw pointers are neither
+/// `Send` nor `Sync`, keeping the iterator confined to a single thread.
+pub struct Iter<'s, T> {
+    // Snapshotted pointers in reverse order.
+    pointers: vec::IntoIter<*const T>,
+    // Ensures the arena cannot be dropped while the iterator exists.
+    _marker: PhantomData<&'s ()>,
+}
+
+impl<'s, T: 's> Iterator for Iter<'s, T> {
+    type Item = &'s T;
+
+    fn next(&mut self) -> Option<&'s T> {
+        let ptr = self.pointers.next()?;
+        // SAFETY: The pointer comes from a snapshot of the tracking list,
+        // which contains only valid, initialised `T`s. The arena cannot be
+        // dropped (we hold `&self`) and `reset` requires `unsafe` or
+        // `&mut self`, so the memory remains stable.
+        Some(unsafe { &*ptr })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.pointers.size_hint()
+    }
+}
+
+impl<'s, T: 's> DoubleEndedIterator for Iter<'s, T> {
+    fn next_back(&mut self) -> Option<&'s T> {
+        let ptr = self.pointers.next_back()?;
+        Some(unsafe { &*ptr })
+    }
+}
+
+/// A mutable iterator over the elements of a [`TypedArenaRef`].
+///
+/// This iterator yields `&mut T` in **reverse allocation order** (LIFO).
+/// Because it takes `&mut self` on the arena, the borrow checker prevents
+/// any additional allocations or resets while the iterator is alive.
+///
+/// # Thread safety
+///
+/// `IterMut` is `!Send` and `!Sync` for the same reasons as [`Iter`].
+pub struct IterMut<'s, T> {
+    // Borrows the tracking list directly.
+    slice: &'s [*mut T],
+    // Position from the end of the slice.
+    pos: usize,
+}
+
+impl<'s, T> Iterator for IterMut<'s, T> {
+    type Item = &'s mut T;
+
+    fn next(&mut self) -> Option<&'s mut T> {
+        if self.pos == 0 {
+            return None;
+        }
+        self.pos -= 1;
+        let ptr = self.slice[self.pos];
+        // SAFETY: We have exclusive access to the arena (&mut self).
+        // The pointer is valid and unique.
+        Some(unsafe { &mut *ptr })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.pos, Some(self.pos))
+    }
+}
+
+impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
+    /// Returns an immutable iterator over all allocated elements, in
+    /// **reverse allocation order** (LIFO).
+    ///
+    /// The iterator yields `&T` and borrows the arena immutably. New
+    /// allocations are possible while the iterator is alive, but they will
+    /// not appear in this iterator because it captures a snapshot of the
+    /// current state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::{BumpArena, TypedArenaRef};
+    ///
+    /// let bump = BumpArena::new(128);
+    /// let mut arena = TypedArenaRef::<String, _>::new_in(&bump);
+    /// arena.try_alloc("foo".to_string()).unwrap();
+    /// arena.try_alloc("bar".to_string()).unwrap();
+    ///
+    /// let mut iter = arena.iter();
+    /// assert_eq!(iter.next(), Some(&"bar".to_string())); // LIFO
+    /// assert_eq!(iter.next(), Some(&"foo".to_string()));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// // A new allocation does not affect `iter`.
+    /// let _third = arena.try_alloc("baz".to_string()).unwrap();
+    /// ```
+    pub fn iter(&self) -> Iter<'_, T> {
+        let allocations = unsafe { &*self.allocations.get() };
+        // Clone the pointers and reverse to get LIFO order.
+        let mut pointers: Vec<*const T> =
+            allocations.iter().copied().map(<*mut T>::cast_const).collect();
+        pointers.reverse();
+        Iter { pointers: pointers.into_iter(), _marker: PhantomData }
+    }
+
+    /// Returns a mutable iterator over all allocated elements, in
+    /// **reverse allocation order** (LIFO).
+    ///
+    /// This method requires `&mut self`, so no other allocations or resets
+    /// are possible while the iterator is alive. The iterator yields
+    /// `&mut T`, giving exclusive access to each element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::{BumpArena, TypedArenaRef};
+    ///
+    /// let bump = BumpArena::new(128);
+    /// let mut arena = TypedArenaRef::<String, _>::new_in(&bump);
+    /// arena.try_alloc("foo".to_string()).unwrap();
+    /// arena.try_alloc("bar".to_string()).unwrap();
+    ///
+    /// for s in arena.iter_mut() {
+    ///     *s = format!("new-{s}");
+    /// }
+    /// ```
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        let allocs = self.allocations.get_mut();
+        let len = allocs.len();
+        IterMut { slice: allocs.as_slice(), pos: len }
     }
 }
