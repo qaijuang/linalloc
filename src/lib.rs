@@ -1,5 +1,6 @@
 #![warn(clippy::pedantic)]
 #![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "nightly", feature(allocator_api))]
 
 #[cfg(all(feature = "lazy", not(any(unix, windows))))]
 compile_error!("the `lazy` feature is currently supported only on Unix and Windows targets");

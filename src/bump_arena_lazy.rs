@@ -283,9 +283,131 @@ unsafe impl UninitAllocator for BumpArenaLazy {
     }
 }
 
+// Safety:
+//
+// Same contract as for `&BumpArena`, with the addition that `grow` may
+// trigger a virtual‑memory commit if the new size requires it.
+#[cfg(feature = "nightly")]
+unsafe impl core::alloc::Allocator for &BumpArenaLazy {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let slice = self.alloc_uninit_slice(layout).ok_or(core::alloc::AllocError)?;
+        // SAFETY: `slice` is guaranteed to be non-null and valid for `layout.size()` bytes.
+        let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
+        Ok(NonNull::slice_from_raw_parts(ptr, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {
+        // Bump allocator memory is reclaimed only via `reset` or `Drop`.
+    }
+
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let offset = self.offset.get();
+        let base = self.base.as_ptr() as usize;
+        let old_ptr = ptr.as_ptr() as usize;
+        let old_offset = old_ptr.checked_sub(base).ok_or(core::alloc::AllocError)?;
+        let old_size = old_layout.size();
+        let new_size = new_layout.size();
+        let old_end = old_offset.checked_add(old_size).ok_or(core::alloc::AllocError)?;
+        let is_last = old_end == offset;
+
+        if !is_last || new_size <= old_size || !old_ptr.is_multiple_of(new_layout.align()) {
+            return Err(core::alloc::AllocError);
+        }
+
+        let required_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
+        if required_offset > self.capacity {
+            return Err(core::alloc::AllocError);
+        }
+
+        if required_offset > self.commit.get() {
+            let slice = self
+                .alloc_uninit_slice_bump(old_offset, required_offset, new_size)
+                .ok_or(core::alloc::AllocError)?;
+            let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
+            return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+        }
+
+        self.offset.set(required_offset);
+        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
+        Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let new_ptr = unsafe { self.grow(ptr, old_layout, new_layout)? };
+        let old_size = old_layout.size();
+        let new_bytes = unsafe { new_ptr.as_ptr().cast::<u8>().add(old_size) };
+        unsafe { core::ptr::write_bytes(new_bytes, 0, new_layout.size() - old_size) };
+        Ok(new_ptr)
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let offset = self.offset.get();
+        let base = self.base.as_ptr() as usize;
+        let old_ptr = ptr.as_ptr() as usize;
+        let old_offset = old_ptr.checked_sub(base).ok_or(core::alloc::AllocError)?;
+        let old_size = old_layout.size();
+        let new_size = new_layout.size();
+        let old_end = old_offset.checked_add(old_size).ok_or(core::alloc::AllocError)?;
+        let is_last = old_end == offset;
+
+        if !is_last || new_size > old_size || !old_ptr.is_multiple_of(new_layout.align()) {
+            return Err(core::alloc::AllocError);
+        }
+
+        let new_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
+        self.offset.set(new_offset);
+        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
+        Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "nightly")]
+    use core::alloc::Allocator;
+
     use super::*;
+
+    #[cfg(feature = "nightly")]
+    fn block_ptr(block: NonNull<[u8]>) -> NonNull<u8> {
+        // SAFETY: `Allocator::allocate` never returns a null block pointer.
+        unsafe { NonNull::new_unchecked(block.as_ptr().cast::<u8>()) }
+    }
+
+    #[cfg(feature = "nightly")]
+    fn allocate_last_block_misaligned_to(
+        bump: &BumpArenaLazy,
+        align: usize,
+    ) -> (NonNull<u8>, Layout) {
+        let layout = Layout::from_size_align(8, 1).unwrap();
+        let pad = Layout::from_size_align(1, 1).unwrap();
+
+        for _ in 0..=align {
+            let block = (&bump).allocate(layout).unwrap();
+            let ptr = block_ptr(block);
+            if !(ptr.as_ptr() as usize).is_multiple_of(align) {
+                return (ptr, layout);
+            }
+            (&bump).allocate(pad).unwrap();
+        }
+
+        panic!("could not create a misaligned last allocation");
+    }
 
     #[test]
     fn alloc_alignment_and_length() {
@@ -366,5 +488,112 @@ mod tests {
         let slice = bump.alloc_uninit_slice(layout).unwrap();
         assert_eq!(slice.len(), 0);
         assert_eq!(bump.used(), 0);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_and_shrink_resize_last_allocation() {
+        let bump = BumpArenaLazy::new(64);
+        let alloc = &bump;
+        let old = Layout::from_size_align(8, 4).unwrap();
+        let grown = Layout::from_size_align(16, 4).unwrap();
+        let shrunk = Layout::from_size_align(4, 4).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        let start = (ptr.as_ptr() as usize) - (bump.base.as_ptr() as usize);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+
+        let grown_block = unsafe { alloc.grow(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+        assert_eq!(grown_ptr, ptr);
+        assert_eq!(bump.used(), start + grown.size());
+        assert_eq!(unsafe { grown_ptr.as_ptr().read() }, 0xAB);
+        assert_eq!(unsafe { grown_ptr.as_ptr().add(old.size() - 1).read() }, 0xAB);
+
+        let shrunk_block = unsafe { alloc.shrink(grown_ptr, grown, shrunk).unwrap() };
+        assert_eq!(block_ptr(shrunk_block), ptr);
+        assert_eq!(bump.used(), start + shrunk.size());
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_zeroed_zeroes_new_tail() {
+        let bump = BumpArenaLazy::new(64);
+        let alloc = &bump;
+        let old = Layout::from_size_align(4, 1).unwrap();
+        let grown = Layout::from_size_align(12, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+
+        let grown_block = unsafe { alloc.grow_zeroed(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+        assert_eq!(grown_ptr, ptr);
+        for index in 0..old.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0xAB);
+        }
+        for index in old.size()..grown.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0);
+        }
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_across_commit_preserves_the_block() {
+        let page = sys::page_size();
+        let bump = BumpArenaLazy::new(page + 64);
+        let alloc = &bump;
+        let old = Layout::from_size_align(page - 8, 1).unwrap();
+        let grown = Layout::from_size_align(page + 16, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+        assert_eq!(bump.used(), old.size());
+        assert_eq!(bump.commit.get(), page);
+
+        let grown_block = unsafe { alloc.grow(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+
+        assert_eq!(grown_ptr, ptr);
+        assert_eq!(bump.used(), grown.size());
+        assert!(bump.commit.get() >= grown.size());
+        assert_eq!(unsafe { grown_ptr.as_ptr().read() }, 0xAB);
+        assert_eq!(unsafe { grown_ptr.as_ptr().add(old.size() - 1).read() }, 0xAB);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn vec_try_reserve_can_grow_inside_allocator() {
+        let bump = BumpArenaLazy::new(64);
+        let mut values = Vec::with_capacity_in(1, &bump);
+        values.push(1);
+
+        assert!(values.try_reserve(1).is_ok());
+        values.push(2);
+
+        assert_eq!(&values, &[1, 2]);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_rejects_resize_when_pointer_does_not_fit_new_alignment() {
+        let bump = BumpArenaLazy::new(256);
+        let (ptr, old) = allocate_last_block_misaligned_to(&bump, 8);
+        let used = bump.used();
+        let grown = Layout::from_size_align(16, 8).unwrap();
+
+        assert!(unsafe { (&bump).grow(ptr, old, grown) }.is_err());
+        assert_eq!(bump.used(), used);
+
+        let bump = BumpArenaLazy::new(256);
+        let (ptr, old) = allocate_last_block_misaligned_to(&bump, 8);
+        let used = bump.used();
+        let shrunk = Layout::from_size_align(4, 8).unwrap();
+
+        assert!(unsafe { (&bump).shrink(ptr, old, shrunk) }.is_err());
+        assert_eq!(bump.used(), used);
     }
 }
