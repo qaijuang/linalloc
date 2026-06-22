@@ -80,7 +80,7 @@ mod platform {
 
         fn munmap(addr: *mut c_void, length: usize) -> i32;
 
-        fn sysconf(name: i32) -> i64;
+        fn getpagesize() -> i32;
 
         // yanked from https://github.com/rust-lang/rust/blob/main/library/std/src/sys/io/error/unix.rs
         #[cfg(not(any(target_os = "dragonfly", target_os = "vxworks", target_os = "rtems")))]
@@ -125,8 +125,6 @@ mod platform {
     const MAP_ANONYMOUS: i32 = 0x1000; // MAP_ANON on macOS/BSD
 
     const MAP_FAILED: *mut c_void = -1isize as *mut c_void;
-
-    const _SC_PAGESIZE: i32 = 29;
 
     pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         #[cfg(target_os = "netbsd")]
@@ -178,12 +176,12 @@ mod platform {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "sysconf returns a long, but page sizes are never that large"
+        reason = "getpagesize returns an int, but page sizes are never negative or very large"
     )]
     #[cold]
     fn page_size_store() -> usize {
-        let raw = unsafe { sysconf(_SC_PAGESIZE) };
-        let sz = if raw < 0 { 4 * 1024 } else { raw as usize };
+        let raw = unsafe { getpagesize() };
+        let sz = if raw <= 0 { 4 * 1024 } else { raw as usize };
         PAGE_SIZE.store(sz, Ordering::Relaxed);
         sz
     }
