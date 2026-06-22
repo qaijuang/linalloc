@@ -32,7 +32,7 @@ use crate::UninitAllocator;
 ///
 /// // Allocate space for a `u64`.
 /// let layout = Layout::new::<u64>();
-/// let slice = bump.alloc_uninit_slice(layout).unwrap();
+/// let slice = bump.try_alloc_uninit(layout).unwrap();
 /// let ptr = slice.as_mut_ptr().cast::<u64>();
 /// unsafe { ptr.write(42) };
 /// let val = unsafe { &*ptr };
@@ -69,16 +69,29 @@ impl BumpArena {
     }
 
     /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
+    /// `layout`, panicking if the allocation fails.
+    ///
+    /// See [`BumpArena::try_alloc_uninit`] for fallible allocation semantics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the arena does not have enough free space after accounting for
+    /// the requested size and alignment.
+    pub fn alloc_uninit(&self, layout: Layout) -> &mut [MaybeUninit<u8>] {
+        self.alloc_uninit_impl(layout).expect("BumpArena allocation failed")
+    }
+
+    /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
     /// `layout`.
     ///
     /// The returned memory is **logically uninitialised** -- it must be
-    /// initialised (e.g. with [`ptr::write`]) before any reads are
+    /// initialised (e.g. with [`core::ptr::write`]) before any reads are
     /// performed.
     ///
     /// The slice borrows the arena immutably (`&self`), so the arena
     /// cannot be dropped or moved while the slice is alive. The
     /// backing store is never resized, so non‑zero allocations remain
-    /// valid until the arena is dropped or [`reset`] is called. A
+    /// valid until the arena is dropped or [`BumpArena::reset`] is called. A
     /// zero‑size allocation returns a well‑aligned dangling slice and
     /// does not advance the bump pointer.
     ///
@@ -86,11 +99,19 @@ impl BumpArena {
     ///
     /// `None` if the arena does not have enough free space after
     /// accounting for the requested size and alignment.
-    ///
-    /// [`ptr::write`]: core::ptr::write
-    /// [`reset`]: BumpArena::reset
-    #[allow(clippy::mut_from_ref)]
+    pub fn try_alloc_uninit(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+        self.alloc_uninit_impl(layout)
+    }
+
+    /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
+    /// `layout`.
+    #[deprecated(since = "1.2.0", note = "Use `BumpArena::try_alloc_uninit` instead.")]
     pub fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+        self.alloc_uninit_impl(layout)
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_uninit_impl(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         let size = layout.size();
         if size == 0 {
             let ptr = layout.dangling_ptr().as_ptr().cast::<MaybeUninit<u8>>();
@@ -157,8 +178,8 @@ impl Drop for BumpArena {
 
 // Safety: all safety invariants required by `UninitAllocator` are upheld by `BumpArena`.
 unsafe impl UninitAllocator for BumpArena {
-    fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
-        self.alloc_uninit_slice(layout)
+    fn try_alloc_uninit(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
+        self.alloc_uninit_impl(layout)
     }
 }
 
@@ -173,7 +194,7 @@ unsafe impl UninitAllocator for BumpArena {
 #[cfg(feature = "nightly")]
 unsafe impl core::alloc::Allocator for BumpArena {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        let slice = self.alloc_uninit_slice(layout).ok_or(core::alloc::AllocError)?;
+        let slice = self.alloc_uninit_impl(layout).ok_or(core::alloc::AllocError)?;
         // SAFETY: `slice` is guaranteed to be non-null and valid for `layout.size()` bytes.
         let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
         Ok(NonNull::slice_from_raw_parts(ptr, layout.size()))
@@ -298,7 +319,7 @@ mod tests {
 
         for align in [1, 2, 4, 8, 16] {
             let layout = Layout::from_size_align(3, align).unwrap();
-            let slice = bump.alloc_uninit_slice(layout).unwrap();
+            let slice = bump.try_alloc_uninit(layout).unwrap();
             let ptr = slice.as_ptr() as usize;
             assert_eq!(ptr % align, 0);
             assert_eq!(slice.len(), 3);
@@ -315,8 +336,8 @@ mod tests {
     #[test]
     fn alloc_no_overlap() {
         let bump = BumpArena::new(64);
-        let a = bump.alloc_uninit_slice(Layout::from_size_align(16, 8).unwrap()).unwrap();
-        let b = bump.alloc_uninit_slice(Layout::from_size_align(8, 8).unwrap()).unwrap();
+        let a = bump.try_alloc_uninit(Layout::from_size_align(16, 8).unwrap()).unwrap();
+        let b = bump.try_alloc_uninit(Layout::from_size_align(8, 8).unwrap()).unwrap();
 
         let a_start = a.as_ptr() as usize;
         let a_end = a_start + a.len();
@@ -330,11 +351,11 @@ mod tests {
     fn alloc_oom_does_not_advance() {
         let bump = BumpArena::new(16);
         let layout = Layout::from_size_align(8, 1).unwrap();
-        bump.alloc_uninit_slice(layout).unwrap();
+        bump.try_alloc_uninit(layout).unwrap();
         let used_before = bump.used();
 
         let too_large = Layout::from_size_align(9, 1).unwrap();
-        assert!(bump.alloc_uninit_slice(too_large).is_none());
+        assert!(bump.try_alloc_uninit(too_large).is_none());
         assert_eq!(bump.used(), used_before);
         assert!(bump.used() <= bump.capacity());
     }
@@ -343,22 +364,22 @@ mod tests {
     fn reset_reuses_base() {
         let bump = BumpArena::new(32);
         let layout = Layout::from_size_align(8, 4).unwrap();
-        let first = bump.alloc_uninit_slice(layout).unwrap();
+        let first = bump.try_alloc_uninit(layout).unwrap();
         let first_ptr = first.as_ptr() as usize;
 
         unsafe { bump.reset() };
         assert_eq!(bump.used(), 0);
 
-        let second = bump.alloc_uninit_slice(layout).unwrap();
+        let second = bump.try_alloc_uninit(layout).unwrap();
         let second_ptr = second.as_ptr() as usize;
         assert_eq!(first_ptr, second_ptr);
     }
 
     #[test]
-    fn zero_capacity_rejects_nonzero_alloc_uninit_slice() {
+    fn zero_capacity_rejects_nonzero_alloc_uninit() {
         let bump = BumpArena::new(0);
         let layout = Layout::from_size_align(1, 1).unwrap();
-        assert!(bump.alloc_uninit_slice(layout).is_none());
+        assert!(bump.try_alloc_uninit(layout).is_none());
         assert_eq!(bump.used(), 0);
     }
 
@@ -366,7 +387,7 @@ mod tests {
     fn zero_size_alloc_does_not_advance() {
         let bump = BumpArena::new(8);
         let layout = Layout::from_size_align(0, 8).unwrap();
-        let slice = bump.alloc_uninit_slice(layout).unwrap();
+        let slice = bump.try_alloc_uninit(layout).unwrap();
         assert_eq!(slice.len(), 0);
         assert_eq!(bump.used(), 0);
     }

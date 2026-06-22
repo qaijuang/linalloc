@@ -9,7 +9,7 @@
 Small, fixed-capacity arena allocators for single-threaded Rust programs.
 
 You pick the capacity up front. The arena capacity never grows.
-Addresses stay stable. When it is full, allocation returns `None`.
+Addresses stay stable. When it is full, fallible allocation returns `None`.
 
 ## Choose an arena
 
@@ -30,6 +30,14 @@ All arenas are `!Send` and `!Sync`. They are deliberately single-threaded.
   standard-library `allocator_api` implementation for `BumpArena` and
   `BumpArenaLazy`.
 
+## Allocation APIs
+
+All arena types expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
+panicking variant. The older inherent methods, `TypedArena::alloc_raw`,
+`TypedArenaLazy::alloc_raw`, `BumpArena::alloc_uninit_slice`, and
+`BumpArenaLazy::alloc_uninit_slice`, remain available for compatibility but are
+deprecated.
+
 ## Use a bump arena
 
 `BumpArena` gives you uninitialized bytes. You choose the layout, initialize
@@ -41,7 +49,7 @@ use core::alloc::Layout;
 use linalloc::BumpArena;
 
 let arena = BumpArena::new(128);
-let slot = arena.alloc_uninit_slice(Layout::new::<u64>()).unwrap();
+let slot = arena.try_alloc_uninit(Layout::new::<u64>()).unwrap();
 let ptr = slot.as_mut_ptr().cast::<u64>();
 
 unsafe { ptr.write(42) };
@@ -87,7 +95,7 @@ the arena is reset or dropped.
 use linalloc::TypedArena;
 
 let arena = TypedArena::<String>::new(4);
-let value = arena.alloc_raw("hello".to_owned()).unwrap();
+let value = arena.try_alloc("hello".to_owned()).unwrap();
 
 value.push_str(" world");
 assert_eq!(value, "hello world");
@@ -100,7 +108,7 @@ are still live:
 use linalloc::TypedArena;
 
 let mut arena = TypedArena::<String>::new(1);
-let value = arena.alloc_raw("held".to_owned()).unwrap();
+let value = arena.try_alloc("held".to_owned()).unwrap();
 //          ----- immutable borrow occurs here
 arena.reset();
 //^^^^^^^^^^^^^ mutable borrow occurs here
@@ -157,8 +165,8 @@ know whether the OS refused more committed memory.
     }
 
     let typed = TypedArenaLazy::<u8>::new(1);
-    assert!(typed.alloc_raw(1).is_some());
-    assert!(typed.alloc_raw(2).is_none());
+    assert!(typed.try_alloc(1).is_some());
+    assert!(typed.try_alloc(2).is_none());
     assert_eq!(typed.last_os_error_code(), None);
 }
 ```
