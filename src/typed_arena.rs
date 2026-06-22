@@ -81,7 +81,7 @@ impl<T> TypedArena<T> {
     /// let x = arena.try_alloc(42).unwrap();
     /// assert_eq!(*x, 42);
     /// ```
-    #[deprecated(since = "1.1.1", note = "Use `TypedArena::try_alloc` instead.")]
+    #[deprecated(since = "1.2.0", note = "Use `TypedArena::try_alloc` instead.")]
     pub fn alloc_raw(&self, value: T) -> Option<&mut T> {
         self.alloc_impl(value)
     }

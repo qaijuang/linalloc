@@ -129,7 +129,7 @@ impl<'a, T, A: UninitAllocator + 'a> TypedArenaRef<'a, T, A> {
         }
 
         let layout = Layout::new::<T>();
-        let slice = self.allocator.alloc_uninit_slice(layout)?;
+        let slice = self.allocator.try_alloc_uninit(layout)?;
         let ptr = slice.as_mut_ptr().cast::<T>();
 
         unsafe {

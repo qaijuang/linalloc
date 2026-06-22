@@ -34,7 +34,7 @@ pub use typed_arena_ref::*;
 /// Implementors must uphold the following invariants. Violating any of them
 /// will cause **undefined behaviour** in safe code that uses [`TypedArenaRef`].
 ///
-/// - **Alignment** -- every slice returned by [`UninitAllocator::alloc_uninit_slice`] is aligned
+/// - **Alignment** -- every slice returned by [`UninitAllocator::try_alloc_uninit`] is aligned
 ///   to at least the requested `layout.align()`.
 /// - **No overlap** -- the memory regions handed out never overlap. For
 ///   example, a bump allocator achieves this by monotonically advancing a
@@ -55,7 +55,7 @@ pub unsafe trait UninitAllocator {
     ///
     /// Returns `None` if the allocator cannot satisfy the request.
     #[allow(clippy::mut_from_ref)]
-    fn alloc_uninit_slice(
+    fn try_alloc_uninit(
         &self,
         layout: core::alloc::Layout,
     ) -> Option<&mut [core::mem::MaybeUninit<u8>]>;
