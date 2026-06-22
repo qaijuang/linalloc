@@ -8,7 +8,7 @@
 
 Small, fixed-capacity arena allocators for single-threaded Rust programs.
 
-You pick the capacity up front. The arena never grows.
+You pick the capacity up front. The arena capacity never grows.
 Addresses stay stable. When it is full, allocation returns `None`.
 
 ## Choose an arena
@@ -22,6 +22,13 @@ Addresses stay stable. When it is full, allocation returns `None`.
 | `TypedArenaRef<'a, T, A>` | default | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
 
 All arenas are `!Send` and `!Sync`. They are deliberately single-threaded.
+
+## Feature flags
+
+- `lazy` enables `BumpArenaLazy` and `TypedArenaLazy<T>` on Unix and Windows.
+- `nightly` requires a nightly Rust toolchain and enables the unstable
+  standard-library `allocator_api` implementation for `BumpArena` and
+  `BumpArenaLazy`.
 
 ## Use a bump arena
 
@@ -40,6 +47,36 @@ let ptr = slot.as_mut_ptr().cast::<u64>();
 unsafe { ptr.write(42) };
 assert_eq!(unsafe { *ptr }, 42);
 ```
+
+## Use as a standard-library allocator
+
+Enable `nightly` when you want an untyped arena to back standard-library
+collections that use the unstable allocator API:
+
+```toml
+[dependencies]
+linalloc = { version = "1", features = ["nightly"] }
+```
+
+```rust
+#![feature(allocator_api)]
+
+# #[cfg(feature = "nightly")]
+# {
+    use linalloc::BumpArena;
+
+    let arena = BumpArena::new(128);
+    let mut values = Vec::with_capacity_in(1, &arena);
+
+    values.push(1);
+    values.try_reserve(1).unwrap();
+    values.push(2);
+
+    assert_eq!(&values, &[1, 2]);
+# }
+```
+
+Use `features = ["nightly", "lazy"]` when the allocator is `BumpArenaLazy`.
 
 ## Use a typed arena
 
@@ -136,6 +173,12 @@ values in reverse allocation order, and then reuses the storage.
 
 For untyped arenas, `reset` is unsafe. All returned slices must be dead, and
 any values stored in the arena must already have been dropped.
+
+With `nightly`, `BumpArena` and `BumpArenaLazy` implement
+`core::alloc::Allocator`. Per-block `deallocate` is a no-op; memory is reclaimed
+only by `reset` or by dropping the arena. `grow`, `grow_zeroed`, and `shrink`
+resize only the most recent allocation in place. Drop all collections and values
+that use an arena allocator before calling `reset`.
 
 ## Miri
 
