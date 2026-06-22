@@ -32,7 +32,7 @@ All arenas are `!Send` and `!Sync`. They are deliberately single-threaded.
 
 ## Allocation APIs
 
-All arena types expose `try_*` for fallible allocation and `alloc_*` for the
+All arena types expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
 panicking variant. The older inherent methods, `TypedArena::alloc_raw`,
 `TypedArenaLazy::alloc_raw`, `BumpArena::alloc_uninit_slice`, and
 `BumpArenaLazy::alloc_uninit_slice`, remain available for compatibility but are
