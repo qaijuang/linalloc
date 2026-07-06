@@ -64,7 +64,6 @@ pub fn page_size() -> usize {
 mod platform {
     use core::ffi::c_void;
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     unsafe extern "C" {
         fn mmap(
@@ -162,28 +161,11 @@ mod platform {
         unsafe { *errno_location() }
     }
 
-    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
-
+    #[allow(clippy::cast_sign_loss)]
     #[inline]
     pub fn page_size() -> usize {
-        let sz = PAGE_SIZE.load(Ordering::Relaxed);
-        if sz != 0 {
-            return sz;
-        }
-        page_size_store()
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "getpagesize returns an int, but page sizes are never negative or very large"
-    )]
-    #[cold]
-    fn page_size_store() -> usize {
-        let raw = unsafe { getpagesize() };
-        let sz = if raw <= 0 { 4 * 1024 } else { raw as usize };
-        PAGE_SIZE.store(sz, Ordering::Relaxed);
-        sz
+        let sz = unsafe { getpagesize() };
+        if sz <= 0 { 4 * 1024 } else { sz as usize }
     }
 }
 
@@ -191,7 +173,6 @@ mod platform {
 mod platform {
     use core::ffi::c_void;
     use core::ptr::NonNull;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     unsafe extern "system" {
         fn VirtualAlloc(
@@ -248,23 +229,10 @@ mod platform {
         unsafe { GetLastError() }.cast_signed()
     }
 
-    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
-
     #[inline]
     pub fn page_size() -> usize {
-        let sz = PAGE_SIZE.load(Ordering::Relaxed);
-        if sz != 0 {
-            return sz;
-        }
-        page_size_store()
-    }
-
-    #[cold]
-    fn page_size_store() -> usize {
         let mut info: SYSTEM_INFO = unsafe { core::mem::zeroed() };
         unsafe { GetSystemInfo(&raw mut info) };
-        let sz = info.dwPageSize as usize;
-        PAGE_SIZE.store(sz, Ordering::Relaxed);
-        sz
+        info.dwPageSize as usize
     }
 }
