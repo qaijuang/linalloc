@@ -98,14 +98,12 @@ impl BumpArena {
     ///
     /// [`new`]: BumpArena::new
     pub fn try_new(capacity: usize) -> Result<Self, i32> {
-        let page_size = sys::page_size();
-
         // saves us one unnecessary syscall.
         if capacity == 0 {
             return Ok(Self {
                 base: NonNull::dangling(),
                 capacity: 0,
-                page_size,
+                page_size: usize::MAX,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
                 last_os_error: Cell::new(0),
@@ -114,6 +112,7 @@ impl BumpArena {
         }
 
         let base = sys::reserve(capacity)?;
+        let page_size = sys::page_size();
 
         Ok(Self {
             base,
