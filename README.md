@@ -26,9 +26,8 @@ Addresses stay stable. When it is full, fallible allocation returns `None`.
 ## Allocation APIs
 
 Both arenas expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
-panicking variant. The older inherent methods, `TypedArena::alloc_raw`, `BumpArena::alloc_uninit_slice`, and
-`BumpArena::alloc_uninit_slice`, remain available for compatibility but are
-deprecated.
+panicking variant. The 2.0 API intentionally keeps only `BumpArena` and
+`TypedArena`, the old lazy/ref arena names were removed.
 
 ## Using bump arena
 
@@ -55,7 +54,7 @@ collections that use the unstable allocator API:
 
 ```toml
 [dependencies]
-linalloc = { version = "1", features = ["nightly"] }
+linalloc = { version = "2", features = ["nightly"] }
 ```
 
 ```rust
@@ -123,12 +122,14 @@ Bump arenas hand you uninitialized bytes. Do not read them until you have
 written them. Values stored in bump arenas are not dropped automatically.
 
 Typed arenas own initialized values. `reset` takes `&mut self`, drops live
-values in reverse allocation order, and then reuses the storage.
+values in reverse allocation order, and clears the typed arena’s tracking. It
+does not rewind the backing allocator; reuse is governed by that allocator’s
+own reset/drop lifecycle.
 
 For bump arenas, `reset` is unsafe. All returned slices must be dead, and
 any values stored in the arena must already have been dropped.
 
-With `nightly`, `BumpArena` implement
+With `nightly`, `BumpArena` implements
 `core::alloc::Allocator`. Per-block `deallocate` is a no-op -- memory is reclaimed
 only by `reset` or by dropping the arena. `grow`, `grow_zeroed`, and `shrink`
 resize only the most recent allocation in place. Drop all collections and values
