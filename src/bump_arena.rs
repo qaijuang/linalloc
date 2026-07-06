@@ -5,21 +5,32 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
 
-use crate::UninitAllocator;
+use crate::{UninitAllocator, sys};
 
-/// A fixed‑capacity, single‑threaded bump allocator.
+/// A fixed‑capacity, single‑threaded bump allocator backed by lazy‑committed
+/// virtual memory.
 ///
-/// The arena hands out mutable slices of [`MaybeUninit<u8>`] that
-/// are logically uninitialised. The caller must initialise the
-/// memory before reading from it. The backing store is a boxed
-/// slice whose capacity is set once at construction and **never
-/// changes**, so addresses remain stable. For zero capacity, the
-/// boxed slice may be a dangling, non‑allocated value.
+/// `BumpArena` provides mutable slices of [`MaybeUninit<u8>`] that are
+/// logically uninitialised. The caller must initialise the memory before
+/// reading from it. The backing store is a reserved virtual‑memory region
+/// whose total capacity is set once at construction and **never changes**.
+/// Physical memory is committed on demand as the bump pointer advances, so
+/// the arena can be created with a very large capacity without immediately
+/// consuming physical memory.
+///
+/// # Memory commitment strategy
+///
+/// The arena uses incremental commitment: the initial physical footprint is
+/// tiny, and pages are committed in chunks as allocations request more memory.
+/// Committed memory is never decommitted until the entire arena is dropped.
+/// This gives stable addresses, predictable performance, and minimal upfront
+/// resource usage.
 ///
 /// # Thread safety
 ///
-/// `BumpArena` is **`!Send` and `!Sync`** -- it contains a raw
-/// pointer marker, which is `!Send` and `!Sync`.
+/// `BumpArena` is **`!Send` and `!Sync`** -- it contains a raw‑pointer marker
+/// that prevents the value from leaving the thread where it was created. The
+/// arena is therefore safe to use in single‑threaded contexts only.
 ///
 /// # Examples
 ///
@@ -32,7 +43,7 @@ use crate::UninitAllocator;
 ///
 /// // Allocate space for a `u64`.
 /// let layout = Layout::new::<u64>();
-/// let slice = bump.try_alloc_uninit(layout).unwrap();
+/// let slice = bump.try_alloc_uninit(layout).expect("out of memory");
 /// let ptr = slice.as_mut_ptr().cast::<u64>();
 /// unsafe { ptr.write(42) };
 /// let val = unsafe { &*ptr };
@@ -42,30 +53,76 @@ use crate::UninitAllocator;
 /// ```
 #[derive(Debug)]
 pub struct BumpArena {
-    base: NonNull<[MaybeUninit<u8>]>,
+    base: NonNull<u8>,
+    capacity: usize,
+    // pays the cost of syscall upfront.
+    page_size: usize,
     offset: Cell<usize>,
+    commit: Cell<usize>,
+    last_os_error: Cell<i32>,
     _invariant: PhantomData<*const ()>,
 }
 
 impl BumpArena {
-    /// Creates a bump allocator with exactly `capacity` bytes of memory.
+    /// Creates a bump allocator that can grow up to `capacity` bytes.
     ///
-    /// The memory is allocated from the global allocator and is
-    /// **uninitialised**. No zeroing or default‑initialisation is
-    /// performed.
+    /// The memory is **reserved** but not committed -- physical pages are
+    /// allocated only when needed, as the bump pointer moves forward.
+    /// If `capacity` is zero, the arena is empty and will reject all non‑zero
+    /// allocations.
     ///
     /// # Panics
     ///
-    /// If allocation fails, the global allocator error handler is
-    /// invoked (typically aborting the process).
+    /// Panics if the operating system cannot reserve the requested address
+    /// range. A zero‑capacity arena never panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use linalloc::BumpArena;
+    ///
+    /// let arena = BumpArena::new(1024);
+    /// assert_eq!(arena.capacity(), 1024);
+    /// assert_eq!(arena.used(), 0);
+    /// ```
     #[must_use]
     pub fn new(capacity: usize) -> Self {
-        Self {
-            // SAFETY: `Box` is guaranteed to be non-null.
-            base: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new_uninit_slice(capacity))) },
-            offset: Cell::new(0),
-            _invariant: PhantomData,
+        Self::try_new(capacity).expect("BumpArena::new failed to reserve memory")
+    }
+
+    /// Like [`new`], but with no panic behaviour.
+    ///
+    /// # Errors
+    ///
+    /// Returns OS error code if reservation fails.
+    ///
+    /// [`new`]: BumpArena::new
+    pub fn try_new(capacity: usize) -> Result<Self, i32> {
+        // saves us one unnecessary syscall.
+        if capacity == 0 {
+            return Ok(Self {
+                base: NonNull::dangling(),
+                capacity: 0,
+                page_size: usize::MAX,
+                offset: Cell::new(0),
+                commit: Cell::new(0),
+                last_os_error: Cell::new(0),
+                _invariant: PhantomData,
+            });
         }
+
+        let base = sys::reserve(capacity)?;
+        let page_size = sys::page_size();
+
+        Ok(Self {
+            base,
+            capacity,
+            page_size,
+            offset: Cell::new(0),
+            commit: Cell::new(0),
+            last_os_error: Cell::new(0),
+            _invariant: PhantomData,
+        })
     }
 
     /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
@@ -76,7 +133,7 @@ impl BumpArena {
     /// # Panics
     ///
     /// Panics if the arena does not have enough free space after accounting for
-    /// the requested size and alignment.
+    /// the requested size and alignment, or if a required memory commit fails.
     pub fn alloc_uninit(&self, layout: Layout) -> &mut [MaybeUninit<u8>] {
         self.alloc_uninit_impl(layout).expect("BumpArena allocation failed")
     }
@@ -85,28 +142,22 @@ impl BumpArena {
     /// `layout`.
     ///
     /// The returned memory is **logically uninitialised** -- it must be
-    /// initialised (e.g. with [`core::ptr::write`]) before any reads are
-    /// performed.
+    /// initialised before any reads are performed (for example, using
+    /// [`core::ptr::write`]).
     ///
-    /// The slice borrows the arena immutably (`&self`), so the arena
-    /// cannot be dropped or moved while the slice is alive. The
-    /// backing store is never resized, so non‑zero allocations remain
-    /// valid until the arena is dropped or [`BumpArena::reset`] is called. A
-    /// zero‑size allocation returns a well‑aligned dangling slice and
-    /// does not advance the bump pointer.
+    /// The slice borrows the arena immutably (`&self`), so the arena cannot
+    /// be dropped or moved while the slice is alive. This guarantees that
+    /// multiple allocations can coexist without aliasing.
+    ///
+    /// A zero‑size allocation returns a well‑aligned dangling slice and does
+    /// **not** advance the bump pointer.
     ///
     /// # Returns
     ///
-    /// `None` if the arena does not have enough free space after
-    /// accounting for the requested size and alignment.
+    /// `None` if the arena does not have enough free space after accounting
+    /// for the requested size and alignment, or if a required memory commit
+    /// fails.
     pub fn try_alloc_uninit(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
-        self.alloc_uninit_impl(layout)
-    }
-
-    /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
-    /// `layout`.
-    #[deprecated(since = "1.2.0", note = "Use `BumpArena::try_alloc_uninit` instead.")]
-    pub fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         self.alloc_uninit_impl(layout)
     }
 
@@ -120,7 +171,7 @@ impl BumpArena {
 
         let align = layout.align();
         let offset = self.offset.get();
-        let base = self.base.as_ptr().cast::<MaybeUninit<u8>>();
+        let base = self.base.as_ptr();
 
         let base_addr = base as usize;
         let addr = base_addr + offset;
@@ -128,38 +179,102 @@ impl BumpArena {
         let aligned_addr = addr.checked_add(align_mask)? & !align_mask;
         let aligned = aligned_addr - base_addr;
         let offset = aligned.checked_add(size)?;
-        if offset > self.capacity() {
+        if offset > self.capacity {
             return None;
         }
 
+        if offset > self.commit.get() {
+            return self.alloc_uninit_bump(aligned, offset, size);
+        }
         self.offset.set(offset);
 
-        // Safety:
-        // - `base` is a non‑null, heap‑allocated box -- the region
-        //   [aligned, aligned+size) is within the allocation.
-        // - The bump pointer is monotonically advanced -- no two
-        //   allocations overlap.
-        // - The returned reference borrows `self`, tying its lifetime
-        //   to the arena.
-        unsafe { Some(slice::from_raw_parts_mut(base.add(aligned), size)) }
+        // Safety: [aligned, offset) lies within the reservation and is
+        // backed by committed memory. The bump pointer is monotonically
+        // advanced, so no two allocations overlap. The returned slice borrows
+        // `self`, tying its lifetime to the arena.
+        unsafe {
+            let ptr = base.add(aligned);
+            Some(slice::from_raw_parts_mut(ptr.cast(), size))
+        }
     }
 
-    /// Resets the bump pointer to the beginning, making the entire
-    /// capacity available for new allocations.
+    // With the code in `alloc_uninit_bump()` out of the way, `alloc_uninit_impl()` compiles down to some super tight assembly.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::mut_from_ref)]
+    fn alloc_uninit_bump(
+        &self,
+        aligned: usize,
+        offset: usize,
+        size: usize,
+    ) -> Option<&mut [MaybeUninit<u8>]> {
+        let current = self.commit.get();
+
+        // Round offset up to the next page boundary, capped by capacity.
+        let needed = offset.checked_next_multiple_of(self.page_size)?.min(self.capacity);
+
+        // Safety:
+        // > `current` is page‑aligned and within the reservation.
+        // > `needed - current` is a multiple of the page size.
+        // > The range has not been committed before, so no overlapping commit.
+        unsafe {
+            let addr = NonNull::new_unchecked(self.base.as_ptr().add(current));
+            if let Err(code) = sys::commit(addr, needed - current) {
+                // capture the OS error code immediately
+                self.last_os_error.set(code);
+                return None;
+            }
+        }
+
+        self.commit.set(needed);
+        self.offset.set(offset);
+
+        unsafe {
+            let ptr = self.base.as_ptr().add(aligned);
+            Some(slice::from_raw_parts_mut(ptr.cast(), size))
+        }
+    }
+
+    /// Returns the OS error code from the last failed allocation or commit
+    /// operation, if any.
+    ///
+    /// The returned value is the raw platform‑specific error code:
+    /// - On Unix: the `errno` value (positive integer).
+    /// - On Windows: the `GetLastError` code.
+    ///
+    /// Returns `None` if no OS-backed reserve or commit failure has been
+    /// recorded for this arena.
+    ///
+    /// # Semantics
+    ///
+    /// This method behaves analogously to `std::io::Error::last_os_error` at
+    /// the point of the failed internal system call. The error code is stable
+    /// until the next failure overwrites it.
+    pub fn last_os_error_code(&self) -> Option<i32> {
+        let code = self.last_os_error.get();
+        if code == 0 { None } else { Some(code) }
+    }
+
+    /// Resets the bump pointer to the beginning, reusing already‑committed
+    /// memory.
     ///
     /// # Safety
     ///
     /// All previously returned slices must no longer be in use.
-    /// This method **does not** run any destructors -- the caller is
-    /// responsible for dropping all values placed in the arena before
-    /// calling `reset`.
+    /// This method does **not** run any destructors -- the caller is
+    /// responsible for dropping all values placed in the arena before calling
+    /// `reset`.
     pub unsafe fn reset(&self) {
         self.offset.set(0);
     }
 
     /// Returns the total capacity of the backing memory, in bytes.
+    ///
+    /// This is the value passed to [`new`] and never changes.
+    ///
+    /// [`new`]: BumpArena::new
     pub fn capacity(&self) -> usize {
-        self.base.len()
+        self.capacity
     }
 
     /// Returns the number of bytes that have been allocated so far.
@@ -170,8 +285,10 @@ impl BumpArena {
 
 impl Drop for BumpArena {
     fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(self.base.as_ptr()));
+        if self.capacity > 0 {
+            unsafe {
+                sys::release(self.base, self.capacity);
+            }
         }
     }
 }
@@ -185,12 +302,8 @@ unsafe impl UninitAllocator for BumpArena {
 
 // Safety:
 //
-// `BumpArena` provides correctly aligned, non‑overlapping memory that remains
-// stable until the arena is dropped or reset. The `Allocator` contract is
-// upheld: `allocate` hands out memory from the bump pointer, `deallocate` is a
-// deliberate no‑op (the arena cannot reclaim individual blocks), and `grow` /
-// `shrink` only resize the most recent allocation in place when it is the last
-// block.
+// Same contract as for `&BumpArena`, with the addition that `grow` may
+// trigger a virtual‑memory commit if the new size requires it.
 #[cfg(feature = "nightly")]
 unsafe impl core::alloc::Allocator for BumpArena {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
@@ -211,7 +324,7 @@ unsafe impl core::alloc::Allocator for BumpArena {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let offset = self.offset.get();
-        let base = self.base.as_ptr().cast::<MaybeUninit<u8>>() as usize;
+        let base = self.base.as_ptr() as usize;
         let old_ptr = ptr.as_ptr() as usize;
         let old_offset = old_ptr.checked_sub(base).ok_or(core::alloc::AllocError)?;
         let old_size = old_layout.size();
@@ -224,16 +337,20 @@ unsafe impl core::alloc::Allocator for BumpArena {
         }
 
         let required_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
-        if required_offset > self.capacity() {
+        if required_offset > self.capacity {
             return Err(core::alloc::AllocError);
         }
 
+        if required_offset > self.commit.get() {
+            let slice = self
+                .alloc_uninit_bump(old_offset, required_offset, new_size)
+                .ok_or(core::alloc::AllocError)?;
+            let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
+            return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+        }
+
         self.offset.set(required_offset);
-        let new_ptr = unsafe {
-            NonNull::new_unchecked(
-                self.base.as_ptr().cast::<MaybeUninit<u8>>().add(old_offset).cast::<u8>(),
-            )
-        };
+        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
         Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
     }
 
@@ -245,7 +362,6 @@ unsafe impl core::alloc::Allocator for BumpArena {
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let new_ptr = unsafe { self.grow(ptr, old_layout, new_layout)? };
         let old_size = old_layout.size();
-        // Zero the newly added tail.
         let new_bytes = unsafe { new_ptr.as_ptr().cast::<u8>().add(old_size) };
         unsafe { core::ptr::write_bytes(new_bytes, 0, new_layout.size() - old_size) };
         Ok(new_ptr)
@@ -258,7 +374,7 @@ unsafe impl core::alloc::Allocator for BumpArena {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let offset = self.offset.get();
-        let base = self.base.as_ptr().cast::<MaybeUninit<u8>>() as usize;
+        let base = self.base.as_ptr() as usize;
         let old_ptr = ptr.as_ptr() as usize;
         let old_offset = old_ptr.checked_sub(base).ok_or(core::alloc::AllocError)?;
         let old_size = old_layout.size();
@@ -272,11 +388,7 @@ unsafe impl core::alloc::Allocator for BumpArena {
 
         let new_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
         self.offset.set(new_offset);
-        let new_ptr = unsafe {
-            NonNull::new_unchecked(
-                self.base.as_ptr().cast::<MaybeUninit<u8>>().add(old_offset).cast::<u8>(),
-            )
-        };
+        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
         Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
     }
 }
@@ -314,7 +426,7 @@ mod tests {
     #[test]
     fn alloc_alignment_and_length() {
         let bump = BumpArena::new(128);
-        let base = bump.base.as_ptr().cast::<MaybeUninit<u8>>() as usize;
+        let base = bump.base.as_ptr() as usize;
         let mut prev_end = 0usize;
 
         for align in [1, 2, 4, 8, 16] {
@@ -403,8 +515,7 @@ mod tests {
 
         let block = alloc.allocate(old).unwrap();
         let ptr = block_ptr(block);
-        let start =
-            (ptr.as_ptr() as usize) - (bump.base.as_ptr().cast::<MaybeUninit<u8>>() as usize);
+        let start = (ptr.as_ptr() as usize) - (bump.base.as_ptr() as usize);
         unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
 
         let grown_block = unsafe { alloc.grow(ptr, old, grown).unwrap() };
@@ -444,6 +555,31 @@ mod tests {
 
     #[cfg(feature = "nightly")]
     #[test]
+    fn allocator_grow_across_commit_preserves_the_block() {
+        let page = sys::page_size();
+        let bump = BumpArena::new(page + 64);
+        let alloc = &bump;
+        let old = Layout::from_size_align(page - 8, 1).unwrap();
+        let grown = Layout::from_size_align(page + 16, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+        assert_eq!(bump.used(), old.size());
+        assert_eq!(bump.commit.get(), page);
+
+        let grown_block = unsafe { alloc.grow(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+
+        assert_eq!(grown_ptr, ptr);
+        assert_eq!(bump.used(), grown.size());
+        assert!(bump.commit.get() >= grown.size());
+        assert_eq!(unsafe { grown_ptr.as_ptr().read() }, 0xAB);
+        assert_eq!(unsafe { grown_ptr.as_ptr().add(old.size() - 1).read() }, 0xAB);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
     fn vec_try_reserve_can_grow_inside_allocator() {
         let bump = BumpArena::new(64);
         let mut values = Vec::with_capacity_in(1, &bump);
@@ -453,6 +589,13 @@ mod tests {
         values.push(2);
 
         assert_eq!(&values, &[1, 2]);
+    }
+
+    #[test]
+    fn try_new_reports_os_error_for_unreservable_capacity() {
+        let err = BumpArena::try_new(usize::MAX).unwrap_err();
+        assert_eq!(Some(err), std::io::Error::last_os_error().raw_os_error());
+        assert_ne!(err, 0);
     }
 
     #[cfg(feature = "nightly")]

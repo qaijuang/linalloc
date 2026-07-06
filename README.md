@@ -1,44 +1,37 @@
 # linalloc (Linear Allocator)
 
-[![miri](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/miri.yml)
+[![CI](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml/badge.svg)](https://github.com/qaijuang/linalloc/actions/workflows/ci.yml)
 [![MSRV](https://img.shields.io/crates/msrv/linalloc)](https://crates.io/crates/linalloc)
 [![crates.io](https://img.shields.io/crates/v/linalloc)](https://crates.io/crates/linalloc)
 [![docs.rs](https://img.shields.io/docsrs/linalloc)](https://docs.rs/linalloc)
 [![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
 
-Small, fixed-capacity arena allocators for single-threaded Rust programs.
+Small, fixed-capacity arena allocator for single-threaded Rust programs.
 
 You pick the capacity up front. The arena capacity never grows.
 Addresses stay stable. When it is full, fallible allocation returns `None`.
 
 ## Choose an arena
 
-| Type                      | Feature | What it gives you                                | Drop behavior                                 |
-| ------------------------- | ------- | ------------------------------------------------ | --------------------------------------------- |
-| `BumpArena`               | default | Raw byte allocation from a fixed heap buffer     | Values must be dropped by the caller          |
-| `TypedArena<T>`           | default | Values of one type from a fixed heap buffer      | Drops live values in reverse allocation order |
-| `BumpArenaLazy`           | `lazy`  | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
-| `TypedArenaLazy<T>`       | `lazy`  | Values of one type from reserved virtual memory  | Drops live values in reverse allocation order |
-| `TypedArenaRef<'a, T, A>` | default | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
-
-All arenas are `!Send` and `!Sync`. They are deliberately single-threaded.
+| Type                   | What it gives you                                | Drop behavior                                 |
+| ---------------------- | ------------------------------------------------ | --------------------------------------------- |
+| `BumpArena`            | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
+| `TypedArena<'a, T, A = BumpArena>` | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
 
 ## Feature flags
 
-- `lazy` enables `BumpArenaLazy` and `TypedArenaLazy<T>` on Unix and Windows.
 - `nightly` requires a nightly Rust toolchain and enables the unstable
-  standard-library `allocator_api` implementation for `BumpArena` and
-  `BumpArenaLazy`.
+  standard-library `allocator_api` implementation for `BumpArena`. Typed
+  arenas backed by `BumpArena` also use that allocator for their internal
+  tracking storage.
 
 ## Allocation APIs
 
-All arena types expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
-panicking variant. The older inherent methods, `TypedArena::alloc_raw`,
-`TypedArenaLazy::alloc_raw`, `BumpArena::alloc_uninit_slice`, and
-`BumpArenaLazy::alloc_uninit_slice`, remain available for compatibility but are
-deprecated.
+Both arenas expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
+panicking variant. The 2.0 API intentionally keeps only `BumpArena` and
+`TypedArena`, the old lazy/ref arena names were removed.
 
-## Use a bump arena
+## Using bump arena
 
 `BumpArena` gives you uninitialized bytes. You choose the layout, initialize
 the memory, and drop any values you place there.
@@ -56,14 +49,14 @@ unsafe { ptr.write(42) };
 assert_eq!(unsafe { *ptr }, 42);
 ```
 
-## Use as a standard-library allocator
+### With standard-library allocator
 
-Enable `nightly` when you want an untyped arena to back standard-library
+Enable `nightly` when you want bump arena to back standard-library
 collections that use the unstable allocator API:
 
 ```toml
 [dependencies]
-linalloc = { version = "1", features = ["nightly"] }
+linalloc = { version = "2", features = ["nightly"] }
 ```
 
 ```rust
@@ -84,49 +77,18 @@ linalloc = { version = "1", features = ["nightly"] }
 # }
 ```
 
-Use `features = ["nightly", "lazy"]` when the allocator is `BumpArenaLazy`.
+### In typed arena as backing allocator
 
-## Use a typed arena
-
-`TypedArena<T>` stores initialized `T` values and drops the live values when
-the arena is reset or dropped.
-
-```rust
-use linalloc::TypedArena;
-
-let arena = TypedArena::<String>::new(4);
-let value = arena.try_alloc("hello".to_owned()).unwrap();
-
-value.push_str(" world");
-assert_eq!(value, "hello world");
-```
-
-The borrow checker prevents resetting a typed arena while references into it
-are still live:
-
-```rust,compile_fail
-use linalloc::TypedArena;
-
-let mut arena = TypedArena::<String>::new(1);
-let value = arena.try_alloc("held".to_owned()).unwrap();
-//          ----- immutable borrow occurs here
-arena.reset();
-//^^^^^^^^^^^^^ mutable borrow occurs here
-drop(value);
-//   ----- immutable borrow later used here
-```
-
-## Use a typed arena with a backing allocator
-
-`TypedArenaRef<'a, T, A>` stores initialized `T` values in a backing allocator
-`A` that implements the `UninitAllocator` trait and drops the live values when the arena is reset or dropped.
+`TypedArena<'a, T, A = BumpArena>` stores initialized `T` values in a backing allocator
+`A` that implements the `UninitAllocator` trait
+and drops the live values when the arena is reset or dropped.
 
 ```rust
-use linalloc::{BumpArena, TypedArenaRef};
+use linalloc::{BumpArena, TypedArena};
 
 let bump = BumpArena::new(128); // Implements `UninitAllocator`
-let mut foo_arena = TypedArenaRef::<String, _>::new_in(&bump);
-let mut bar_arena = TypedArenaRef::<String, _>::new_in(&bump);
+let mut foo_arena = TypedArena::<String>::new_in(&bump);
+let mut bar_arena = TypedArena::<String>::new_in(&bump);
 
 let foo = foo_arena.try_alloc("foo".to_owned()).unwrap();
 let bar = bar_arena.try_alloc("bar".to_owned()).unwrap();
@@ -135,62 +97,42 @@ assert_eq!(foo, "foo");
 assert_eq!(bar, "bar");
 ```
 
-## Use lazy arenas
+## Reading OS errors
 
-Enable `lazy` when you want to reserve a large virtual address range and
-commit physical memory only as allocation advances:
-
-```toml
-[dependencies]
-linalloc = { version = "1", features = ["lazy"] }
-```
-
-The lazy feature is supported on Unix and Windows targets.
-
-## Read lazy OS errors
-
-Lazy arenas keep the raw OS code from the last failed reserve or commit call.
+Bump arena keeps the raw OS code from the last failed reserve or commit call.
 Use it when `try_new` fails, or when allocation returns `None` and you need to
 know whether the OS refused more committed memory.
 
 ```rust
-#[cfg(all(feature = "lazy", any(unix, windows), not(miri)))]
-{
-    use core::alloc::Layout;
+use core::alloc::Layout;
 
-    use linalloc::{BumpArenaLazy, TypedArenaLazy};
+use linalloc::BumpArena;
 
-    if let Err(code) = BumpArenaLazy::try_new(usize::MAX) {
-        assert_eq!(Some(code), std::io::Error::last_os_error().raw_os_error());
-    }
-
-    let typed = TypedArenaLazy::<u8>::new(1);
-    assert!(typed.try_alloc(1).is_some());
-    assert!(typed.try_alloc(2).is_none());
-    assert_eq!(typed.last_os_error_code(), None);
+if let Err(code) = BumpArena::try_new(usize::MAX) {
+    assert_eq!(Some(code), std::io::Error::last_os_error().raw_os_error());
 }
+
+
+let arena = BumpArena::new(128);
+let _slot = arena.try_alloc_uninit(Layout::new::<u64>()).unwrap();
+assert_eq!(arena.last_os_error_code(), None);
 ```
 
 ## Safety
 
-Untyped arenas hand you uninitialized bytes. Do not read them until you have
-written them. Values stored in untyped arenas are not dropped automatically.
+Bump arenas hand you uninitialized bytes. Do not read them until you have
+written them. Values stored in bump arenas are not dropped automatically.
 
 Typed arenas own initialized values. `reset` takes `&mut self`, drops live
-values in reverse allocation order, and then reuses the storage.
+values in reverse allocation order, and clears the typed arena’s tracking. It
+does not rewind the backing allocator; reuse is governed by that allocator’s
+own reset/drop lifecycle.
 
-For untyped arenas, `reset` is unsafe. All returned slices must be dead, and
+For bump arenas, `reset` is unsafe. All returned slices must be dead, and
 any values stored in the arena must already have been dropped.
 
-With `nightly`, `BumpArena` and `BumpArenaLazy` implement
-`core::alloc::Allocator`. Per-block `deallocate` is a no-op; memory is reclaimed
+With `nightly`, `BumpArena` implements
+`core::alloc::Allocator`. Per-block `deallocate` is a no-op -- memory is reclaimed
 only by `reset` or by dropping the arena. `grow`, `grow_zeroed`, and `shrink`
 resize only the most recent allocation in place. Drop all collections and values
 that use an arena allocator before calling `reset`.
-
-## Miri
-
-Miri covers the default eager arenas.
-
-The lazy arenas use platform virtual-memory calls. Miri does not currently
-support every protection mode used by that path.
