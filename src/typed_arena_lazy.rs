@@ -39,6 +39,8 @@ use crate::sys;
 pub struct TypedArenaLazy<T> {
     base: NonNull<MaybeUninit<T>>,
     capacity: usize,
+    // pays the cost of syscall upfront.
+    page_size: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
     last_os_error: Cell<i32>,
@@ -76,10 +78,13 @@ impl<T> TypedArenaLazy<T> {
     ///
     /// [`new`]: TypedArenaLazy::new
     pub fn try_new(capacity: usize) -> Result<Self, i32> {
+        let page_size = sys::page_size();
+
         if capacity == 0 || size_of::<T>() == 0 {
             return Ok(Self {
                 base: NonNull::dangling(),
                 capacity,
+                page_size,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
                 last_os_error: Cell::new(0),
@@ -94,6 +99,7 @@ impl<T> TypedArenaLazy<T> {
         Ok(Self {
             base: base.cast(),
             capacity,
+            page_size,
             offset: Cell::new(0),
             commit: Cell::new(0),
             last_os_error: Cell::new(0),
@@ -181,14 +187,13 @@ impl<T> TypedArenaLazy<T> {
     #[inline(never)]
     #[allow(clippy::mut_from_ref)]
     fn alloc_bump(&self, idx: usize, required_bytes: usize, value: T) -> Option<&mut T> {
-        let page = sys::page_size();
         let current = self.commit.get();
 
         // `new` guarantees `capacity * size_of::<T>()` fits.
         let total_bytes = self.capacity * size_of::<T>();
 
         // Next page rounding
-        let needed = required_bytes.checked_next_multiple_of(page)?.min(total_bytes);
+        let needed = required_bytes.checked_next_multiple_of(self.page_size)?.min(total_bytes);
 
         // Safety:
         // > `current` is page‑aligned and within the reservation.

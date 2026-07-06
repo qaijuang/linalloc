@@ -55,6 +55,8 @@ use crate::{UninitAllocator, sys};
 pub struct BumpArenaLazy {
     base: NonNull<u8>,
     capacity: usize,
+    // pays the cost of syscall upfront.
+    page_size: usize,
     offset: Cell<usize>,
     commit: Cell<usize>,
     last_os_error: Cell<i32>,
@@ -96,11 +98,14 @@ impl BumpArenaLazy {
     ///
     /// [`new`]: BumpArenaLazy::new
     pub fn try_new(capacity: usize) -> Result<Self, i32> {
+        let page_size = sys::page_size();
+
         // saves us one unnecessary syscall.
         if capacity == 0 {
             return Ok(Self {
                 base: NonNull::dangling(),
                 capacity: 0,
+                page_size,
                 offset: Cell::new(0),
                 commit: Cell::new(0),
                 last_os_error: Cell::new(0),
@@ -113,6 +118,7 @@ impl BumpArenaLazy {
         Ok(Self {
             base,
             capacity,
+            page_size,
             offset: Cell::new(0),
             commit: Cell::new(0),
             last_os_error: Cell::new(0),
@@ -210,11 +216,10 @@ impl BumpArenaLazy {
         offset: usize,
         size: usize,
     ) -> Option<&mut [MaybeUninit<u8>]> {
-        let page = sys::page_size();
         let current = self.commit.get();
 
         // Round offset up to the next page boundary, capped by capacity.
-        let needed = offset.checked_next_multiple_of(page)?.min(self.capacity);
+        let needed = offset.checked_next_multiple_of(self.page_size)?.min(self.capacity);
 
         // Safety:
         // > `current` is page‑aligned and within the reservation.
