@@ -16,12 +16,14 @@ Addresses stay stable. When it is full, fallible allocation returns `None`.
 | Type                   | What it gives you                                | Drop behavior                                 |
 | ---------------------- | ------------------------------------------------ | --------------------------------------------- |
 | `BumpArena`            | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
-| `TypedArena<'a, T, A>` | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
+| `TypedArena<'a, T, A = BumpArena>` | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
 
 ## Feature flags
 
 - `nightly` requires a nightly Rust toolchain and enables the unstable
-  standard-library `allocator_api` implementation for `BumpArena`.
+  standard-library `allocator_api` implementation for `BumpArena`. Typed
+  arenas backed by `BumpArena` also use that allocator for their internal
+  tracking storage.
 
 ## Allocation APIs
 
@@ -77,7 +79,7 @@ linalloc = { version = "2", features = ["nightly"] }
 
 ### In typed arena as backing allocator
 
-`TypedArena<'a, T, A>` stores initialized `T` values in a backing allocator
+`TypedArena<'a, T, A = BumpArena>` stores initialized `T` values in a backing allocator
 `A` that implements the `UninitAllocator` trait
 and drops the live values when the arena is reset or dropped.
 
@@ -85,8 +87,8 @@ and drops the live values when the arena is reset or dropped.
 use linalloc::{BumpArena, TypedArena};
 
 let bump = BumpArena::new(128); // Implements `UninitAllocator`
-let mut foo_arena = TypedArena::<String, _>::new_in(&bump);
-let mut bar_arena = TypedArena::<String, _>::new_in(&bump);
+let mut foo_arena = TypedArena::<String>::new_in(&bump);
+let mut bar_arena = TypedArena::<String>::new_in(&bump);
 
 let foo = foo_arena.try_alloc("foo".to_owned()).unwrap();
 let bar = bar_arena.try_alloc("bar".to_owned()).unwrap();
