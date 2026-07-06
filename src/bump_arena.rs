@@ -161,13 +161,6 @@ impl BumpArena {
         self.alloc_uninit_impl(layout)
     }
 
-    /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
-    /// `layout`.
-    #[deprecated(since = "1.2.0", note = "Use `BumpArena::try_alloc_uninit` instead.")]
-    pub fn alloc_uninit_slice(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
-        self.alloc_uninit_impl(layout)
-    }
-
     #[allow(clippy::mut_from_ref)]
     fn alloc_uninit_impl(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         let size = layout.size();
@@ -254,11 +247,9 @@ impl BumpArena {
     ///
     /// # Semantics
     ///
-    /// This method behaves analogously to [`std::io::Error::last_os_error`] at
+    /// This method behaves analogously to `std::io::Error::last_os_error` at
     /// the point of the failed internal system call. The error code is stable
     /// until the next failure overwrites it.
-    ///
-    /// [`std::io::Error::last_os_error`]: std::io::Error::last_os_error
     pub fn last_os_error_code(&self) -> Option<i32> {
         let code = self.last_os_error.get();
         if code == 0 { None } else { Some(code) }

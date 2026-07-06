@@ -40,7 +40,7 @@ pub use typed_arena::*;
 ///   so can cause data races on the allocator’s internal state and lead to
 ///   undefined behaviour.
 pub unsafe trait UninitAllocator {
-    /// Allocates a mutable slice of [`MaybeUninit<u8>`] that satisfies
+    /// Allocates a mutable slice of [`core::mem::MaybeUninit`] that satisfies
     /// `layout`.
     ///
     /// Returns `None` if the allocator cannot satisfy the request.

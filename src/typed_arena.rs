@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::{self, size_of};
+use core::mem::{self, needs_drop, size_of};
 use core::ptr::{self, drop_in_place};
 
 use crate::UninitAllocator;
@@ -15,9 +15,9 @@ use crate::UninitAllocator;
 ///
 /// Values allocated in this arena are automatically dropped in reverse
 /// allocation order when the `TypedArena` is dropped or [`TypedArena::reset`] is called.
-/// The memory in the backing allocator is **not** freed -- only the objects’
-/// destructors are executed. Reuse of the underlying memory is governed by the
-/// allocator’s own life cycle (e.g., manually reset after all
+/// The memory in the backing allocator is **not** freed or rewound -- only the
+/// objects’ destructors are executed. Reuse of the underlying memory is
+/// governed by the allocator’s own life cycle (e.g., manually reset after all
 /// `TypedArena`s have been dropped).
 ///
 /// # Thread safety
@@ -116,12 +116,12 @@ impl<'a, T, A: UninitAllocator> TypedArena<'a, T, A> {
 
     #[allow(clippy::mut_from_ref)]
     fn alloc_impl(&self, value: T) -> Option<&mut T> {
-        // Zero‑sized types never consume memory -- they just write to a
-        // dangling pointer. No tracking is necessary because ZSTs have no
-        // destructors and no drop glue.
         if size_of::<T>() == 0 {
             unsafe {
                 let dangling = ptr::NonNull::<T>::dangling();
+                if needs_drop::<T>() {
+                    (*self.allocations.get()).push(dangling.as_ptr());
+                }
                 dangling.as_ptr().write(value);
                 return Some(&mut *dangling.as_ptr());
             }
@@ -132,13 +132,13 @@ impl<'a, T, A: UninitAllocator> TypedArena<'a, T, A> {
         let ptr = slice.as_mut_ptr().cast::<T>();
 
         unsafe {
-            // Initialise the freshly allocated memory.
-            ptr.write(value);
             // Push the pointer into the tracking list. Because this method
             // takes `&self`, we need interior mutability -- `UnsafeCell` gives
             // us a unique access path that does not alias with any &mut borrow
             // of the arena (which would require `&mut self`).
             (*self.allocations.get()).push(ptr);
+            // Initialise the freshly allocated memory after tracking succeeds.
+            ptr.write(value);
             // Return a mutable reference that borrows `self`, freezing the
             // arena while the reference is alive.
             Some(&mut *ptr)
@@ -201,11 +201,10 @@ impl<'a, T, A: UninitAllocator> TypedArena<'a, T, A> {
     /// that no references to the arena’s contents are currently alive.
     /// After the call, [`TypedArena::len`] returns `0`.
     ///
-    /// The memory in the backing allocator is **not** freed -- only the
-    /// destructors of the allocated values are executed. The memory can be
-    /// reused by further allocations through this `TypedArena` (or other
-    /// borrows of the same allocator), but it will not be physically released until
-    /// the allocator is dropped or reset.
+    /// The memory in the backing allocator is **not** freed or rewound -- only
+    /// the destructors of the allocated values are executed. Future
+    /// allocations request fresh memory from the backing allocator. Reuse is
+    /// governed by that allocator’s own reset/drop lifecycle.
     ///
     /// # Examples
     ///
@@ -222,12 +221,11 @@ impl<'a, T, A: UninitAllocator> TypedArena<'a, T, A> {
     pub fn reset(&mut self) {
         let allocs = self.allocations.get_mut();
         // Drop in reverse order, mirroring Rust’s own drop semantics.
-        for &ptr in allocs.iter().rev() {
+        while let Some(ptr) = allocs.pop() {
             unsafe {
                 drop_in_place(ptr);
             }
         }
-        allocs.clear();
     }
 }
 
@@ -289,5 +287,78 @@ impl<T, A: UninitAllocator> Drop for DrainIter<'_, T, A> {
                 drop_in_place(ptr);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::BumpArena;
+
+    #[test]
+    fn zst_with_drop_is_dropped_when_arena_drops() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Zst;
+
+        impl Drop for Zst {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        DROPS.store(0, Ordering::Relaxed);
+        let bump = BumpArena::new(0);
+        {
+            let arena = TypedArena::<Zst, _>::new_in(&bump);
+            assert!(arena.try_alloc(Zst).is_some());
+            assert!(arena.try_alloc(Zst).is_some());
+            assert_eq!(arena.len(), 2);
+        }
+
+        assert_eq!(DROPS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn reset_removes_pointer_before_dropping_value() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct PanicOnFirstDrop(u8);
+
+        impl Drop for PanicOnFirstDrop {
+            fn drop(&mut self) {
+                let _ = self.0;
+                assert!(DROPS.fetch_add(1, Ordering::Relaxed) != 0, "drop panic");
+            }
+        }
+
+        DROPS.store(0, Ordering::Relaxed);
+        let bump = BumpArena::new(128);
+        let mut arena = TypedArena::<PanicOnFirstDrop, _>::new_in(&bump);
+        arena.try_alloc(PanicOnFirstDrop(1)).unwrap();
+        arena.try_alloc(PanicOnFirstDrop(2)).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.reset()));
+
+        assert!(result.is_err());
+        assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+        assert_eq!(arena.len(), 1);
+
+        drop(arena);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn reset_does_not_rewind_the_backing_allocator() {
+        let bump = BumpArena::new(size_of::<u64>());
+        let mut arena = TypedArena::<u64, _>::new_in(&bump);
+
+        assert!(arena.try_alloc(1).is_some());
+        arena.reset();
+
+        assert!(arena.try_alloc(2).is_none());
+        assert_eq!(arena.len(), 0);
     }
 }
