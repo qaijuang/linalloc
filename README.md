@@ -9,7 +9,8 @@
 Small, fixed-capacity arena allocator for single-threaded Rust programs.
 
 You pick the capacity up front. The arena capacity never grows.
-Addresses stay stable. When it is full, fallible allocation returns `None`.
+Raw bump allocations stay stable. When the arena is full, fallible allocation
+returns `None`.
 
 ## Choose an arena
 
@@ -25,7 +26,8 @@ Addresses stay stable. When it is full, fallible allocation returns `None`.
   arenas backed by `BumpArena` also use that allocator for their internal
   tracking storage. The allocator implementation remains fixed-capacity, but
   `grow`, `grow_zeroed`, and `shrink` can relocate blocks into remaining arena
-  capacity when in-place resizing is not possible.
+  capacity when in-place resizing is not possible, so allocator-managed blocks
+  must use the pointer returned from successful resize operations.
 
 ## Allocation APIs
 

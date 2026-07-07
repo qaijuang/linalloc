@@ -23,8 +23,9 @@ use crate::{UninitAllocator, sys};
 /// The arena uses incremental commitment: the initial physical footprint is
 /// tiny, and pages are committed in chunks as allocations request more memory.
 /// Committed memory is never decommitted until the entire arena is dropped.
-/// This gives stable addresses, predictable performance, and minimal upfront
-/// resource usage.
+/// Raw bump allocations keep stable addresses, while allocator API resize
+/// operations may return a relocated block. This gives predictable performance
+/// and minimal upfront resource usage.
 ///
 /// # Thread safety
 ///
