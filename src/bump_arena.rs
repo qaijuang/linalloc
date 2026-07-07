@@ -23,8 +23,9 @@ use crate::{UninitAllocator, sys};
 /// The arena uses incremental commitment: the initial physical footprint is
 /// tiny, and pages are committed in chunks as allocations request more memory.
 /// Committed memory is never decommitted until the entire arena is dropped.
-/// This gives stable addresses, predictable performance, and minimal upfront
-/// resource usage.
+/// Raw bump allocations keep stable addresses, while allocator API resize
+/// operations may return a relocated block. This gives predictable performance
+/// and minimal upfront resource usage.
 ///
 /// # Thread safety
 ///
@@ -303,7 +304,8 @@ unsafe impl UninitAllocator for BumpArena {
 // Safety:
 //
 // Same contract as for `&BumpArena`, with the addition that `grow` may
-// trigger a virtual‑memory commit if the new size requires it.
+// trigger a virtual-memory commit or relocate the block into remaining arena
+// capacity if in-place growth is not possible.
 #[cfg(feature = "nightly")]
 unsafe impl core::alloc::Allocator for BumpArena {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
@@ -332,26 +334,45 @@ unsafe impl core::alloc::Allocator for BumpArena {
         let old_end = old_offset.checked_add(old_size).ok_or(core::alloc::AllocError)?;
         let is_last = old_end == offset;
 
-        if !is_last || new_size <= old_size || !old_ptr.is_multiple_of(new_layout.align()) {
+        if new_size < old_size {
             return Err(core::alloc::AllocError);
         }
 
-        let required_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
-        if required_offset > self.capacity {
-            return Err(core::alloc::AllocError);
+        if old_ptr.is_multiple_of(new_layout.align()) {
+            if new_size == old_size {
+                return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+            }
+
+            if is_last {
+                let required_offset =
+                    old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
+                if required_offset > self.capacity {
+                    return Err(core::alloc::AllocError);
+                }
+
+                if required_offset > self.commit.get() {
+                    let slice = self
+                        .alloc_uninit_bump(old_offset, required_offset, new_size)
+                        .ok_or(core::alloc::AllocError)?;
+                    let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
+                    return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+                }
+
+                self.offset.set(required_offset);
+                let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
+                return Ok(NonNull::slice_from_raw_parts(new_ptr, new_size));
+            }
         }
 
-        if required_offset > self.commit.get() {
-            let slice = self
-                .alloc_uninit_bump(old_offset, required_offset, new_size)
-                .ok_or(core::alloc::AllocError)?;
-            let ptr = unsafe { NonNull::new_unchecked(slice.as_mut_ptr().cast()) };
-            return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+        let new_block = self.allocate(new_layout)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new_block.as_ptr().cast::<u8>(),
+                old_layout.size(),
+            );
         }
-
-        self.offset.set(required_offset);
-        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
-        Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
+        Ok(new_block)
     }
 
     unsafe fn grow_zeroed(
@@ -382,14 +403,27 @@ unsafe impl core::alloc::Allocator for BumpArena {
         let old_end = old_offset.checked_add(old_size).ok_or(core::alloc::AllocError)?;
         let is_last = old_end == offset;
 
-        if !is_last || new_size > old_size || !old_ptr.is_multiple_of(new_layout.align()) {
+        if new_size > old_size {
             return Err(core::alloc::AllocError);
         }
 
-        let new_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
-        self.offset.set(new_offset);
-        let new_ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(old_offset)) };
-        Ok(NonNull::slice_from_raw_parts(new_ptr, new_size))
+        if old_ptr.is_multiple_of(new_layout.align()) {
+            if is_last {
+                let new_offset = old_offset.checked_add(new_size).ok_or(core::alloc::AllocError)?;
+                self.offset.set(new_offset);
+            }
+            return Ok(NonNull::slice_from_raw_parts(ptr, new_size));
+        }
+
+        let new_block = self.allocate(new_layout)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new_block.as_ptr().cast::<u8>(),
+                new_layout.size(),
+            );
+        }
+        Ok(new_block)
     }
 }
 
@@ -591,6 +625,101 @@ mod tests {
         assert_eq!(&values, &[1, 2]);
     }
 
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_relocates_non_last_allocation() {
+        let alloc = &BumpArena::new(128);
+        let old = Layout::from_size_align(8, 1).unwrap();
+        let blocker = Layout::from_size_align(8, 1).unwrap();
+        let grown = Layout::from_size_align(16, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+        let blocker = alloc.allocate(blocker).unwrap();
+        let blocker_ptr = block_ptr(blocker);
+        unsafe { blocker_ptr.as_ptr().write_bytes(0xCD, 8) };
+
+        let grown_block = unsafe { alloc.grow(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+
+        assert_ne!(grown_ptr, ptr);
+        for index in 0..old.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0xAB);
+        }
+        for index in 0..8 {
+            assert_eq!(unsafe { blocker_ptr.as_ptr().add(index).read() }, 0xCD);
+        }
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_zeroed_relocation_zeroes_new_tail() {
+        let alloc = &BumpArena::new(128);
+        let old = Layout::from_size_align(4, 1).unwrap();
+        let blocker = Layout::from_size_align(8, 1).unwrap();
+        let grown = Layout::from_size_align(12, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+        alloc.allocate(blocker).unwrap();
+
+        let grown_block = unsafe { alloc.grow_zeroed(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+
+        assert_ne!(grown_ptr, ptr);
+        for index in 0..old.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0xAB);
+        }
+        for index in old.size()..grown.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0);
+        }
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn allocator_grow_error_keeps_old_allocation_untouched() {
+        let bump = BumpArena::new(24);
+        let alloc = &bump;
+        let old = Layout::from_size_align(8, 1).unwrap();
+        let blocker = Layout::from_size_align(16, 1).unwrap();
+        let grown = Layout::from_size_align(16, 1).unwrap();
+
+        let block = alloc.allocate(old).unwrap();
+        let ptr = block_ptr(block);
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
+        alloc.allocate(blocker).unwrap();
+        let used = bump.used();
+
+        assert!(unsafe { alloc.grow(ptr, old, grown) }.is_err());
+        assert_eq!(bump.used(), used);
+        for index in 0..old.size() {
+            assert_eq!(unsafe { ptr.as_ptr().add(index).read() }, 0xAB);
+        }
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn vec_try_reserve_relocates_when_buffer_is_not_last_allocation() {
+        let bump = BumpArena::new(128);
+        let mut values = Vec::with_capacity_in(1, &bump);
+        values.push(1u64);
+        let original = values.as_ptr();
+        let blocker = bump.allocate(Layout::new::<u64>()).unwrap();
+        let blocker_ptr = block_ptr(blocker);
+        unsafe { blocker_ptr.as_ptr().write_bytes(0xCD, core::mem::size_of::<u64>()) };
+
+        assert!(values.try_reserve(1).is_ok());
+        values.push(2);
+
+        assert_ne!(values.as_ptr(), original);
+        assert_eq!(&values, &[1, 2]);
+        for index in 0..core::mem::size_of::<u64>() {
+            assert_eq!(unsafe { blocker_ptr.as_ptr().add(index).read() }, 0xCD);
+        }
+    }
+
     #[test]
     fn try_new_reports_os_error_for_unreservable_capacity() {
         let err = BumpArena::try_new(usize::MAX).unwrap_err();
@@ -600,21 +729,31 @@ mod tests {
 
     #[cfg(feature = "nightly")]
     #[test]
-    fn allocator_rejects_resize_when_pointer_does_not_fit_new_alignment() {
+    fn allocator_relocates_when_pointer_does_not_fit_new_alignment() {
         let bump = BumpArena::new(256);
         let (ptr, old) = allocate_last_block_misaligned_to(&bump, 8);
-        let used = bump.used();
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
         let grown = Layout::from_size_align(16, 8).unwrap();
 
-        assert!(unsafe { bump.grow(ptr, old, grown) }.is_err());
-        assert_eq!(bump.used(), used);
+        let grown_block = unsafe { bump.grow(ptr, old, grown).unwrap() };
+        let grown_ptr = block_ptr(grown_block);
+        assert_ne!(grown_ptr, ptr);
+        assert_eq!((grown_ptr.as_ptr() as usize) % grown.align(), 0);
+        for index in 0..old.size() {
+            assert_eq!(unsafe { grown_ptr.as_ptr().add(index).read() }, 0xAB);
+        }
 
         let bump = BumpArena::new(256);
         let (ptr, old) = allocate_last_block_misaligned_to(&bump, 8);
-        let used = bump.used();
+        unsafe { ptr.as_ptr().write_bytes(0xAB, old.size()) };
         let shrunk = Layout::from_size_align(4, 8).unwrap();
 
-        assert!(unsafe { bump.shrink(ptr, old, shrunk) }.is_err());
-        assert_eq!(bump.used(), used);
+        let shrunk_block = unsafe { bump.shrink(ptr, old, shrunk).unwrap() };
+        let shrunk_ptr = block_ptr(shrunk_block);
+        assert_ne!(shrunk_ptr, ptr);
+        assert_eq!((shrunk_ptr.as_ptr() as usize) % shrunk.align(), 0);
+        for index in 0..shrunk.size() {
+            assert_eq!(unsafe { shrunk_ptr.as_ptr().add(index).read() }, 0xAB);
+        }
     }
 }
