@@ -23,7 +23,9 @@ Addresses stay stable. When it is full, fallible allocation returns `None`.
 - `nightly` requires a nightly Rust toolchain and enables the unstable
   standard-library `allocator_api` implementation for `BumpArena`. Typed
   arenas backed by `BumpArena` also use that allocator for their internal
-  tracking storage.
+  tracking storage. The allocator implementation remains fixed-capacity, but
+  `grow`, `grow_zeroed`, and `shrink` can relocate blocks into remaining arena
+  capacity when in-place resizing is not possible.
 
 ## Allocation APIs
 
@@ -134,5 +136,7 @@ any values stored in the arena must already have been dropped.
 With `nightly`, `BumpArena` implements
 `core::alloc::Allocator`. Per-block `deallocate` is a no-op -- memory is reclaimed
 only by `reset` or by dropping the arena. `grow`, `grow_zeroed`, and `shrink`
-resize only the most recent allocation in place. Drop all collections and values
-that use an arena allocator before calling `reset`.
+reuse the existing block when possible and otherwise may relocate it into
+remaining arena capacity. Relocated old blocks are logically deallocated but
+their bytes are not physically reclaimed until `reset` or drop. Drop all
+collections and values that use an arena allocator before calling `reset`.
