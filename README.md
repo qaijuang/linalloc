@@ -6,7 +6,7 @@
 [![docs.rs](https://img.shields.io/docsrs/linalloc)](https://docs.rs/linalloc)
 [![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
 
-Small, fixed-capacity arena allocator for single-threaded Rust programs.
+Small, lazy commit, fixed-capacity arena allocator for single-threaded Rust programs.
 
 You pick the capacity up front. The arena capacity never grows.
 Raw bump allocations stay stable. When the arena is full, fallible allocation
@@ -14,9 +14,9 @@ returns `None`.
 
 ## Choose an arena
 
-| Type                   | What it gives you                                | Drop behavior                                 |
-| ---------------------- | ------------------------------------------------ | --------------------------------------------- |
-| `BumpArena`            | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
+| Type                               | What it gives you                                | Drop behavior                                 |
+| ---------------------------------- | ------------------------------------------------ | --------------------------------------------- |
+| `BumpArena`                        | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
 | `TypedArena<'a, T, A = BumpArena>` | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
 
 ## Feature flags
