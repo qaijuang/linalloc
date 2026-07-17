@@ -1,6 +1,6 @@
 [package]
 name = "linalloc"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 rust-version = "1.95"
 description = """
@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/qaijuang/linalloc"
 keywords = ["arena", "bump", "allocator", "linear", "memory"]
 categories = ["memory-management"]
-exclude = [".github", "rustfmt.toml", ".gitignore"]
+exclude = [".github", "rustfmt.toml", ".gitignore", "benches"]
 
 [package.metadata.docs.rs]
 all-features = true
