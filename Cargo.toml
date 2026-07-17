@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/qaijuang/linalloc"
 keywords = ["arena", "bump", "allocator", "linear", "memory"]
 categories = ["memory-management"]
-exclude = [".github", "rustfmt.toml", ".gitignore", "benches"]
+exclude = [".github", "rustfmt.toml", ".gitignore", "benches", "rust-toolchain.toml"]
 
 [package.metadata.docs.rs]
 all-features = true
