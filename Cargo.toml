@@ -12,8 +12,8 @@ keywords = ["arena", "bump", "allocator", "linear", "memory"]
 categories = ["memory-management"]
 exclude = [".github", "rustfmt.toml", ".gitignore"]
 
-[features]
-nightly = []
-
 [package.metadata.docs.rs]
 all-features = true
+
+[features]
+nightly = []

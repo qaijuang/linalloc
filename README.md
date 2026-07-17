@@ -29,12 +29,6 @@ returns `None`.
   capacity when in-place resizing is not possible, so allocator-managed blocks
   must use the pointer returned from successful resize operations.
 
-## Allocation APIs
-
-Both arenas expose `try_*` for fallible allocation and `alloc` / `alloc_*` for the
-panicking variant. The 2.0 API intentionally keeps only `BumpArena` and
-`TypedArena`, the old lazy/ref arena names were removed.
-
 ## Using bump arena
 
 `BumpArena` gives you uninitialized bytes. You choose the layout, initialize
