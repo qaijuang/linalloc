@@ -8,7 +8,7 @@ compile_error!("`linalloc` only supports Unix and Windows targets");
 mod bump_arena;
 mod typed_arena;
 
-pub(crate) mod sys;
+pub mod sys;
 
 pub use bump_arena::*;
 pub use typed_arena::*;

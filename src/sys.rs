@@ -14,7 +14,7 @@ use core::ptr::NonNull;
 /// # Errors
 ///
 /// Returns the OS error code if the system call fails (e.g. out of virtual address space).
-pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
+pub(crate) fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
     platform::reserve(size)
 }
 
@@ -34,7 +34,7 @@ pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
 /// # Errors
 ///
 /// Returns the OS error code if the system call fails (e.g. out of physical memory).
-pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
+pub(crate) fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
     platform::commit(addr, size)
 }
 
@@ -46,7 +46,7 @@ pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
 ///   [`reserve`], and `size` must be the exact reservation size.
 /// - This function must be called at most once for a given reservation.
 /// - No pointers into the released region may be used afterwards.
-pub unsafe fn release(addr: NonNull<u8>, size: usize) {
+pub(crate) unsafe fn release(addr: NonNull<u8>, size: usize) {
     unsafe { platform::release(addr, size) }
 }
 
@@ -56,6 +56,7 @@ pub unsafe fn release(addr: NonNull<u8>, size: usize) {
 /// extremely cheap (a relaxed atomic load).
 ///
 /// On Unix targets, if the page size query fails, this falls back to 4KiB.
+#[must_use]
 pub fn page_size() -> usize {
     platform::page_size()
 }

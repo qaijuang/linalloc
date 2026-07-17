@@ -17,3 +17,10 @@ all-features = true
 
 [features]
 nightly = []
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "lib"
+harness = false
