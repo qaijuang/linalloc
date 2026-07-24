@@ -135,6 +135,7 @@ impl BumpArena {
     ///
     /// Panics if the arena does not have enough free space after accounting for
     /// the requested size and alignment, or if a required memory commit fails.
+    #[inline]
     pub fn alloc_uninit(&self, layout: Layout) -> &mut [MaybeUninit<u8>] {
         self.alloc_uninit_impl(layout).expect("BumpArena allocation failed")
     }
@@ -158,11 +159,13 @@ impl BumpArena {
     /// `None` if the arena does not have enough free space after accounting
     /// for the requested size and alignment, or if a required memory commit
     /// fails.
+    #[inline]
     pub fn try_alloc_uninit(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         self.alloc_uninit_impl(layout)
     }
 
     #[allow(clippy::mut_from_ref)]
+    #[inline]
     fn alloc_uninit_impl(&self, layout: Layout) -> Option<&mut [MaybeUninit<u8>]> {
         let size = layout.size();
         if size == 0 {
@@ -200,9 +203,9 @@ impl BumpArena {
     }
 
     // With the code in `alloc_uninit_bump()` out of the way, `alloc_uninit_impl()` compiles down to some super tight assembly.
+    #[allow(clippy::mut_from_ref)]
     #[cold]
     #[inline(never)]
-    #[allow(clippy::mut_from_ref)]
     fn alloc_uninit_bump(
         &self,
         aligned: usize,
