@@ -52,9 +52,6 @@ pub(crate) unsafe fn release(addr: NonNull<u8>, size: usize) {
 
 /// Returns the system’s page size in bytes.
 ///
-/// The value is cached after the first call -- subsequent calls are
-/// extremely cheap (a relaxed atomic load).
-///
 /// On Unix targets, if the page size query fails, this falls back to 4KiB.
 #[must_use]
 pub fn page_size() -> usize {
