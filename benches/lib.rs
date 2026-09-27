@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "nightly", feature(allocator_api))]
-
 use core::alloc::Layout;
 use core::hint::black_box;
 

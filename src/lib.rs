@@ -1,5 +1,5 @@
 #![warn(clippy::pedantic)]
-#![cfg_attr(feature = "nightly", feature(allocator_api))]
+#![cfg_attr(feature = "nightly", feature(allocator_ext))]
 #![doc = include_str!("../README.md")]
 
 #[cfg(not(any(unix, windows)))]
