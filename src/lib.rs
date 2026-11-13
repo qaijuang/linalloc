@@ -346,6 +346,7 @@ impl Drop for BumpArena {
 // failure. Safe allocation methods never invalidate other blocks.
 // Reset is unsafe, and deallocation is a no-op.
 unsafe impl core::alloc::Allocator for BumpArena {
+    #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let slice = self.alloc_uninit_impl(layout).ok_or(core::alloc::AllocError)?;
         // SAFETY: `slice` is guaranteed to be non-null and valid for `layout.size()` bytes.
