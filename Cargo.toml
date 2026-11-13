@@ -1,6 +1,6 @@
 [package]
 name = "linalloc"
-version = "2.0.2"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.100"
 description = """
@@ -19,7 +19,7 @@ exclude = [
 ]
 
 [dependencies]
-linalloc-sys = { path = "./linalloc-sys" }
+linalloc-sys = { version = "0.1.0", path = "./linalloc-sys" }
 
 [dev-dependencies]
 criterion = "0.8.2"

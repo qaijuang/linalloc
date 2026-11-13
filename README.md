@@ -8,7 +8,7 @@
 
 A fixed-capacity bump allocator backed by virtual memory.
 
-It rserves address space up front and makes pages writable as needed.
+It reserves address space up front and makes pages writable as needed.
 For single-threaded Rust on Unix and Windows.
 
 ## Typed allocation

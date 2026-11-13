@@ -18,7 +18,7 @@ pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
 /// Uses `mprotect` on Unix and `VirtualAlloc(MEM_COMMIT)` on Windows.
 /// The OS rounds the range up to whole pages.
 ///
-/// # Requirements
+/// # Safety
 ///
 /// - `addr` is page-aligned and belongs to a live reservation from [`reserve`]
 /// - `size` is nonzero and the range fits within the reservation
@@ -27,7 +27,7 @@ pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
 /// # Errors
 ///
 /// Returns the OS error code on failure.
-pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
+pub unsafe fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
     platform::commit(addr, size)
 }
 
