@@ -1,0 +1,3 @@
+[package]
+name = "linalloc-sys"
+edition = "2024"

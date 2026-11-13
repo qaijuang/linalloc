@@ -6,33 +6,34 @@
 [![docs.rs](https://img.shields.io/docsrs/linalloc)](https://docs.rs/linalloc)
 [![license](https://img.shields.io/github/license/qaijuang/linalloc)](https://github.com/qaijuang/linalloc/blob/main/LICENSE)
 
-Small, lazy commit, fixed-capacity arena allocator for single-threaded Rust programs.
+A fixed-capacity bump allocator backed by virtual memory.
 
-You pick the capacity up front. The arena capacity never grows.
-Raw bump allocations stay stable. When the arena is full, fallible allocation
-returns `None`.
+It rserves address space up front and makes pages writable as needed.
+For single-threaded Rust on Unix and Windows.
 
-## Choose an arena
+## Typed allocation
 
-| Type                               | What it gives you                                | Drop behavior                                 |
-| ---------------------------------- | ------------------------------------------------ | --------------------------------------------- |
-| `BumpArena`                        | Raw byte allocation from reserved virtual memory | Values must be dropped by the caller          |
-| `TypedArena<'a, T, A = BumpArena>` | Values of one type from a backing allocator      | Drops live values in reverse allocation order |
+`alloc` stores a value and returns `&mut T`. `try_alloc` returns `None` on
+failure and drops the rejected value. Stored values aren't dropped automatically.
 
-## Feature flags
+```rust
+use linalloc::BumpArena;
 
-- `nightly` requires a nightly Rust toolchain and enables the unstable
-  standard-library `allocator_api` implementation for `BumpArena`. Typed
-  arenas backed by `BumpArena` also use that allocator for their internal
-  tracking storage. The allocator implementation remains fixed-capacity, but
-  `grow`, `grow_zeroed`, and `shrink` can relocate blocks into remaining arena
-  capacity when in-place resizing is not possible, so allocator-managed blocks
-  must use the pointer returned from successful resize operations.
+let arena = BumpArena::new(128);
+let source = String::from("hello");
+let number = arena.alloc(42_u64);
+let text = arena.try_alloc(source.as_str()).unwrap();
 
-## Using bump arena
+assert_eq!(*number, 42);
+assert_eq!(*text, "hello");
+```
 
-`BumpArena` gives you uninitialized bytes. You choose the layout, initialize
-the memory, and drop any values you place there.
+For delayed initialization, allocate a `MaybeUninit<T>` and call `write`.
+
+## Raw allocation
+
+`alloc_uninit` and `try_alloc_uninit` return uninitialized bytes for a `Layout`.
+Initialize the memory before reading it.
 
 ```rust
 use core::alloc::Layout;
@@ -40,99 +41,54 @@ use core::alloc::Layout;
 use linalloc::BumpArena;
 
 let arena = BumpArena::new(128);
-let slot = arena.try_alloc_uninit(Layout::new::<u64>()).unwrap();
+let slot = arena.alloc_uninit(Layout::new::<u64>());
 let ptr = slot.as_mut_ptr().cast::<u64>();
 
-unsafe { ptr.write(42) };
-assert_eq!(unsafe { *ptr }, 42);
+unsafe {
+    ptr.write(42);
+    assert_eq!(*ptr, 42);
+}
 ```
 
-### With standard-library allocator
+## Vec support
 
-Enable `nightly` when you want bump arena to back standard-library
-collections that use the unstable allocator API:
-
-```toml
-[dependencies]
-linalloc = { version = "2", features = ["nightly"] }
-```
+On Rust 1.100 and later, `Vec` can allocate through `&arena`.
+Growing a `Vec` may move its buffer.
 
 ```rust
-#![feature(allocator_api)]
-
-# #[cfg(feature = "nightly")]
-# {
-    use linalloc::BumpArena;
-
-    let arena = BumpArena::new(128);
-    let mut values = Vec::with_capacity_in(1, &arena);
-
-    values.push(1);
-    values.try_reserve(1).unwrap();
-    values.push(2);
-
-    assert_eq!(&values, &[1, 2]);
-# }
-```
-
-### In typed arena as backing allocator
-
-`TypedArena<'a, T, A = BumpArena>` stores initialized `T` values in a backing allocator
-`A` that implements the `UninitAllocator` trait
-and drops the live values when the arena is reset or dropped.
-
-```rust
-use linalloc::{BumpArena, TypedArena};
-
-let bump = BumpArena::new(128); // Implements `UninitAllocator`
-let mut foo_arena = TypedArena::<String>::new_in(&bump);
-let mut bar_arena = TypedArena::<String>::new_in(&bump);
-
-let foo = foo_arena.try_alloc("foo".to_owned()).unwrap();
-let bar = bar_arena.try_alloc("bar".to_owned()).unwrap();
-
-assert_eq!(foo, "foo");
-assert_eq!(bar, "bar");
-```
-
-## Reading OS errors
-
-Bump arena keeps the raw OS code from the last failed reserve or commit call.
-Use it when `try_new` fails, or when allocation returns `None` and you need to
-know whether the OS refused more committed memory.
-
-```rust
-use core::alloc::Layout;
-
 use linalloc::BumpArena;
 
-if let Err(code) = BumpArena::try_new(usize::MAX) {
-    assert_eq!(Some(code), std::io::Error::last_os_error().raw_os_error());
-}
-
-
 let arena = BumpArena::new(128);
-let _slot = arena.try_alloc_uninit(Layout::new::<u64>()).unwrap();
-assert_eq!(arena.last_os_error_code(), None);
+let mut values = Vec::with_capacity_in(1, &arena);
+values.push(1);
+values.try_reserve(1).unwrap();
+values.push(2);
+
+assert_eq!(&values, &[1, 2]);
 ```
+
+## OS errors
+
+`try_new` returns the OS error code if reservation fails.
+`last_os_error_code` reports the last commit failure for an existing arena.
+It returns `None` until a commit fails. Success, reset, and capacity exhaustion
+don't clear it. Use `std::io::Error::from_raw_os_error(code)` to format the code.
 
 ## Safety
 
-Bump arenas hand you uninitialized bytes. Do not read them until you have
-written them. Values stored in bump arenas are not dropped automatically.
+The arena doesn't run destructors for stored values. Drop values that own
+resources before resetting or dropping the arena.
 
-Typed arenas own initialized values. `reset` takes `&mut self`, drops live
-values in reverse allocation order, and clears the typed arena’s tracking. It
-does not rewind the backing allocator; reuse is governed by that allocator’s
-own reset/drop lifecycle.
+`reset` is unsafe. End all borrows and drop stored values and allocator-backed
+collections first. Don't use old references or pointers afterward.
 
-For bump arenas, `reset` is unsafe. All returned slices must be dead, and
-any values stored in the arena must already have been dropped.
+## Testing
 
-With `nightly`, `BumpArena` implements
-`core::alloc::Allocator`. Per-block `deallocate` is a no-op -- memory is reclaimed
-only by `reset` or by dropping the arena. `grow`, `grow_zeroed`, and `shrink`
-reuse the existing block when possible and otherwise may relocate it into
-remaining arena capacity. Relocated old blocks are logically deallocated but
-their bytes are not physically reclaimed until `reset` or drop. Drop all
-collections and values that use an arena allocator before calling `reset`.
+```sh
+cargo test
+cargo miri test
+```
+
+Under Miri, `linalloc-sys` uses aligned heap storage instead of OS mappings.
+This checks the arena's memory operations, not page protection, lazy commitment,
+or OS error codes. Native tests use the OS backend.

@@ -1,64 +1,60 @@
-//! Platform‑specific memory management for incremental commitment.
-//!
-//! This module provides a thin, safe‑to‑use abstraction over the operating
-//! system’s virtual memory primitives. It is **not** part of the public API
-//! of `linalloc` -- it exists solely to support the arena allocator’s lazy
-//! commit strategy.
+//! Virtual memory primitives used by linalloc.
 
 use core::ptr::NonNull;
 
-/// Reserve `size` bytes of address space without committing physical memory.
+/// Reserves `size` bytes of address space.
 ///
-/// The returned pointer is guaranteed to be page‑aligned and non‑null.
+/// Returns a non-null, page-aligned pointer. The OS rounds `size` up to whole pages.
 ///
 /// # Errors
 ///
-/// Returns the OS error code if the system call fails (e.g. out of virtual address space).
-pub(crate) fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
+/// Returns the OS error code on failure.
+pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
     platform::reserve(size)
 }
 
-/// Commit `size` bytes starting at `addr`, making the memory readable and
-/// writable.
+/// Makes `size` bytes at `addr` readable and writable.
+///
+/// Uses `mprotect` on Unix and `VirtualAlloc(MEM_COMMIT)` on Windows.
+/// The OS rounds the range up to whole pages.
 ///
 /// # Requirements
 ///
-/// - `addr` must be page‑aligned and must point to memory previously reserved
-///   but not yet committed.
-/// - `size` must be non-zero and fit within the reservation. The platform
-///   commits every page containing at least one byte in `[addr, addr + size)`.
-/// - The range `[addr, addr + size)` must not contain any already‑committed
-///   memory (the operating system may allow overlapping commits, but the
-///   allocator never does so).
+/// - `addr` is page-aligned and belongs to a live reservation from [`reserve`]
+/// - `size` is nonzero and the range fits within the reservation
+/// - The range has not been committed
 ///
 /// # Errors
 ///
-/// Returns the OS error code if the system call fails (e.g. out of physical memory).
-pub(crate) fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
+/// Returns the OS error code on failure.
+pub fn commit(addr: NonNull<u8>, size: usize) -> Result<(), i32> {
     platform::commit(addr, size)
 }
 
-/// Release the entire reservation, including all committed pages.
+/// Releases a reservation and its committed pages.
 ///
 /// # Safety
 ///
-/// - `addr` must be the exact pointer returned by a previous call to
-///   [`reserve`], and `size` must be the exact reservation size.
-/// - This function must be called at most once for a given reservation.
-/// - No pointers into the released region may be used afterwards.
-pub(crate) unsafe fn release(addr: NonNull<u8>, size: usize) {
+/// - `addr` and `size` match a live reservation from [`reserve`]
+/// - The reservation is released only once
+/// - No pointers into it are used afterward
+pub unsafe fn release(addr: NonNull<u8>, size: usize) {
     unsafe { platform::release(addr, size) }
 }
 
-/// Returns the system’s page size in bytes.
+/// Returns the page size in bytes.
 ///
-/// On Unix targets, if the page size query fails, this falls back to 4KiB.
+/// Uses 4096 if the Unix page size query fails.
 #[must_use]
 pub fn page_size() -> usize {
     platform::page_size()
 }
 
-#[cfg(unix)]
+#[cfg(miri)]
+#[path = "miri.rs"]
+mod platform;
+
+#[cfg(all(unix, not(miri)))]
 mod platform {
     use core::ffi::c_void;
     use core::ptr::NonNull;
@@ -125,11 +121,8 @@ mod platform {
 
     pub fn reserve(size: usize) -> Result<NonNull<u8>, i32> {
         #[cfg(target_os = "netbsd")]
-        // NetBSD allows an mmap(2) caller to specify what protection flags they
-        // will use later via mprotect. It does not allow a caller to move from
-        // PROT_NONE to PROT_READ | PROT_WRITE.
-        //
-        // see PROT_MPROTECT in man 2 mmap
+        // PROT_MPROTECT(PROT_READ | PROT_WRITE) allows later read/write access
+        // See mmap(2)
         const DESIRED_PROT: i32 = (PROT_READ | PROT_WRITE) << 3;
 
         #[cfg(not(target_os = "netbsd"))]
@@ -141,7 +134,7 @@ mod platform {
         if ptr.is_null() || ptr == MAP_FAILED {
             Err(last_os_error())
         } else {
-            // SAFETY: The pointer is already checked and is not null
+            // SAFETY: ptr is non-null and not MAP_FAILED.
             Ok(unsafe { NonNull::new_unchecked(ptr.cast()) })
         }
     }
@@ -167,7 +160,7 @@ mod platform {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(miri)))]
 mod platform {
     use core::ffi::c_void;
     use core::ptr::NonNull;

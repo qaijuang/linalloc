@@ -2,7 +2,7 @@ use core::alloc::Layout;
 use core::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use linalloc::{BumpArena, sys};
+use linalloc::BumpArena;
 
 const CAPACITY: usize = 1024 * 1024 * 64;
 
@@ -70,7 +70,6 @@ fn bench_alignment(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "nightly")]
 fn bench_grow_in_place(c: &mut Criterion) {
     use core::alloc::Allocator;
 
@@ -84,7 +83,6 @@ fn bench_grow_in_place(c: &mut Criterion) {
             use core::ptr::NonNull;
 
             unsafe { arena.reset() };
-            // Allocate a single u64
             let ptr = arena.allocate(old_layout).unwrap();
             let ptr = NonNull::new(ptr.as_ptr().cast::<u8>()).unwrap();
             let ptr = unsafe { arena.grow(ptr, old_layout, new_layout).unwrap() };
@@ -94,7 +92,6 @@ fn bench_grow_in_place(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "nightly")]
 fn bench_vec_push(c: &mut Criterion) {
     let mut group = c.benchmark_group("vec_push");
 
@@ -120,7 +117,7 @@ fn bench_reset(c: &mut Criterion) {
 
     group.bench_function("linalloc", |b| {
         let arena = linalloc();
-        // Fill it a bit to simulate state
+        // Allocate before timing reset
         for _ in 0..100 {
             arena.try_alloc_uninit(Layout::new::<u64>()).unwrap();
         }
@@ -132,7 +129,7 @@ fn bench_reset(c: &mut Criterion) {
 
 fn bench_commit_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("commit_boundary");
-    let page = sys::page_size();
+    let page = linalloc_sys::page_size();
     dbg!(page);
     let small_layout = Layout::from_size_align(page - 8, 1).unwrap();
     let across_layout = Layout::from_size_align(16, 1).unwrap();
@@ -156,13 +153,8 @@ criterion_group!(
     bench_alignment,
     bench_reset,
     bench_commit_boundary,
+    bench_grow_in_place,
+    bench_vec_push
 );
 
-#[cfg(feature = "nightly")]
-criterion_group!(nightly_benches, bench_grow_in_place, bench_vec_push,);
-
-#[cfg(feature = "nightly")]
-criterion_main!(benches, nightly_benches);
-
-#[cfg(not(feature = "nightly"))]
 criterion_main!(benches);
